@@ -132,8 +132,10 @@ local function getOwnerInfo(container)
 
     scan(container)
 
-    local isOwned = ownerValue ~= nil and ownerText ~= "" and ownerText ~= "nil"
-    return ownerValue, ownerText, isOwned
+    local normalized = string.lower(tostring(ownerText or ""))
+    local isNoOne = normalized == "none" or normalized == "noone" or normalized == "" or normalized == "nil"
+    local isOwned = ownerValue ~= nil and not isNoOne
+    return ownerValue, ownerText, isOwned, isNoOne
 end
 
 local function getStandEntries()
@@ -150,7 +152,7 @@ local function getStandEntries()
                 if index and index >= 1 and index <= 30 then
                     local proximity, ownerValue, prompt = findStandProximity(child)
                     if proximity then
-                        local _, ownerText, isOwned = getOwnerInfo(child)
+                        local _, ownerText, isOwned, isNoOne = getOwnerInfo(child)
                         table.insert(entries, {
                             model = child,
                             proximity = proximity,
@@ -158,6 +160,7 @@ local function getStandEntries()
                             ownerText = ownerText,
                             prompt = prompt,
                             isOwned = isOwned,
+                            isNoOne = isNoOne,
                         })
                     end
                 end
@@ -185,6 +188,12 @@ local function findBestStand()
     local entries = getStandEntries()
     if #entries == 0 then
         return nil
+    end
+
+    for _, entry in ipairs(entries) do
+        if entry.isNoOne then
+            return entry
+        end
     end
 
     for _, entry in ipairs(entries) do
