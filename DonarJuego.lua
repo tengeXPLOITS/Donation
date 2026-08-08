@@ -22,6 +22,7 @@ local mainTab = window:CreateTab({ name = "Main", icon = 0 })
 local settingsTab = window:CreateTab({ name = "Settings", icon = 0 })
 
 local state = {
+    autoWalk = true,
     webhookUrl = "",
     claimInProgress = false,
 }
@@ -183,6 +184,24 @@ local function findBestStand()
     return entries[1]
 end
 
+local function waitForArrival(rootPart, targetPosition)
+    if not rootPart or not targetPosition then
+        return true
+    end
+
+    local start = os.clock()
+    while os.clock() - start < 0.6 do
+        if rootPart and rootPart:IsA("BasePart") and targetPosition then
+            if (rootPart.Position - targetPosition).Magnitude <= 4 then
+                return true
+            end
+        end
+        task.wait(0.05)
+    end
+
+    return false
+end
+
 local function triggerEditPlotClaim(standName)
     local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
     if not eventsFolder then
@@ -270,9 +289,14 @@ local function claimBestStand()
         end
     end
 
-    task.wait(0.01)
-
     local standName = tostring(standEntry.model.Name or "")
+    local arrived = waitForArrival(rootPart, targetPosition)
+    if not arrived then
+        state.claimInProgress = false
+        window:Notify({ title = "Donation Hub", content = string.format("Arrived too late for %s.", standName) })
+        return false
+    end
+
     local eventTriggered = triggerEditPlotClaim(standName)
 
     if standEntry.prompt then
