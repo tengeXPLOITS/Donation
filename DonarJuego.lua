@@ -36,6 +36,7 @@ local state = {
     minPlayers = DEFAULT_MIN_PLAYERS,
     webhookUrl = "",
     hopCount = 1,
+    suppressHopUntil = 0,
 }
 
 local function getServerPlayerCount()
@@ -165,19 +166,21 @@ local function claimBestStand()
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
     local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+    local targetPosition = standEntry.proximity and standEntry.proximity.Position or nil
+
+    if rootPart and targetPosition then
+        pcall(function()
+            rootPart.CFrame = CFrame.new(targetPosition + Vector3.new(0, 4, 0))
+        end)
+    end
 
     if humanoid and rootPart and standEntry.proximity then
-        local success = pcall(function()
-            local targetPosition = standEntry.proximity.Position
+        pcall(function()
             if humanoid and humanoid:IsA("Humanoid") then
                 humanoid:MoveTo(targetPosition)
             end
-            task.wait(0.4)
+            task.wait(0.2)
         end)
-
-        if not success then
-            warn("Failed to move player to stand")
-        end
     end
 
     if standEntry.prompt then
@@ -187,6 +190,7 @@ local function claimBestStand()
             standEntry.prompt:InputHoldEnd()
         end)
         if ok then
+            state.suppressHopUntil = os.clock() + 20
             window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", tostring(standEntry.model.Name)) })
             return true
         end
@@ -241,6 +245,10 @@ end
 
 local function queueHop(force)
     if not state.autoHop and not force then
+        return false
+    end
+
+    if os.clock() < state.suppressHopUntil then
         return false
     end
 
