@@ -190,15 +190,44 @@ local function triggerEditPlotClaim(standName)
     end
 
     local editPlotEvent = eventsFolder:FindFirstChild("EditPlot")
-    if not editPlotEvent or not editPlotEvent:IsA("RemoteEvent") then
+    if not editPlotEvent then
         return false
     end
 
-    local ok = pcall(function()
-        editPlotEvent:FireServer(tostring(standName), false)
-    end)
+    local candidates = {
+        { tostring(standName), false },
+        { tostring(standName), true },
+        { tonumber(standName), false },
+        { tonumber(standName), true },
+        { standName, false },
+        { standName, true },
+    }
 
-    return ok
+    if editPlotEvent:IsA("RemoteEvent") then
+        for _, args in ipairs(candidates) do
+            local ok = pcall(function()
+                editPlotEvent:FireServer(args[1], args[2])
+            end)
+            if ok then
+                return true
+            end
+        end
+        return false
+    end
+
+    if editPlotEvent:IsA("RemoteFunction") then
+        for _, args in ipairs(candidates) do
+            local ok, result = pcall(function()
+                return editPlotEvent:InvokeServer(args[1], args[2])
+            end)
+            if ok then
+                return true
+            end
+        end
+        return false
+    end
+
+    return false
 end
 
 local function claimBestStand()
@@ -241,7 +270,7 @@ local function claimBestStand()
         end
     end
 
-    task.wait(0.05)
+    task.wait(0.01)
 
     local standName = tostring(standEntry.model.Name or "")
     local eventTriggered = triggerEditPlotClaim(standName)
@@ -250,6 +279,7 @@ local function claimBestStand()
         local ok = pcall(function()
             standEntry.prompt.Enabled = true
             standEntry.prompt:InputHoldBegin()
+            task.wait(0.1)
             standEntry.prompt:InputHoldEnd()
         end)
         if ok then
