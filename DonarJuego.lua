@@ -241,15 +241,10 @@ local function claimBestStand()
         end
     end
 
-    task.wait(0.1)
+    task.wait(0.05)
 
     local standName = tostring(standEntry.model.Name or "")
     local eventTriggered = triggerEditPlotClaim(standName)
-    if eventTriggered then
-        state.claimInProgress = false
-        window:Notify({ title = "Donation Hub", content = string.format("Triggered claim for %s.", standName) })
-        return true
-    end
 
     if standEntry.prompt then
         local ok = pcall(function()
@@ -262,6 +257,12 @@ local function claimBestStand()
             window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", standName) })
             return true
         end
+    end
+
+    if eventTriggered then
+        state.claimInProgress = false
+        window:Notify({ title = "Donation Hub", content = string.format("Triggered claim for %s.", standName) })
+        return true
     end
 
     state.claimInProgress = false
