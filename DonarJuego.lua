@@ -26,6 +26,7 @@ local window = Rayfield:CreateWindow({
 })
 
 local mainTab = window:CreateTab({ name = "Main", icon = 0 })
+local serverHopTab = window:CreateTab({ name = "Server Hop", icon = 0 })
 local settingsTab = window:CreateTab({ name = "Settings", icon = 0 })
 
 local state = {
@@ -55,43 +56,71 @@ local function postWebhook(message)
     end)
 end
 
+local function getStandFolder()
+    local found = workspace:FindFirstChild("Stands")
+    if found then
+        return found
+    end
+
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if descendant:IsA("Folder") and descendant.Name == "Stands" then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function findStandProximity(model)
+    local candidates = {}
+    if model:IsA("BasePart") then
+        table.insert(candidates, model)
+    end
+
+    for _, descendant in ipairs(model:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            table.insert(candidates, descendant)
+        end
+    end
+
+    for _, candidate in ipairs(candidates) do
+        local ownerValue = candidate:FindFirstChild("Owner")
+        local prompt = candidate:FindFirstChildOfClass("ProximityPrompt")
+        if ownerValue or prompt then
+            return candidate, ownerValue, prompt
+        end
+    end
+
+    return nil
+end
+
 local function getStandEntries()
-    local standFolder = workspace:FindFirstChild("Stands")
+    local standFolder = getStandFolder()
     if not standFolder then
         return {}
     end
 
     local entries = {}
-    for i = 1, 30 do
-        local child = standFolder:FindFirstChild(tostring(i))
-        if child and child:IsA("Model") then
-            local sign = child:FindFirstChild("sign")
-            if sign and sign:IsA("Model") then
-                local proximity = sign:FindFirstChild("Proximity")
-                if proximity and proximity:IsA("BasePart") then
-                    local ownerValue = proximity:FindFirstChild("Owner")
-                    local attachment = proximity:FindFirstChild("Attachment")
-                    local prompt = attachment and attachment:FindFirstChildOfClass("ProximityPrompt")
-                    if not prompt then
-                        prompt = proximity:FindFirstChildOfClass("ProximityPrompt")
-                    end
-
-                    local ownerText = ""
-                    local isOwned = false
-                    if ownerValue and ownerValue:IsA("StringValue") then
-                        ownerText = tostring(ownerValue.Value or "")
-                        isOwned = ownerText ~= ""
-                    end
-
-                    table.insert(entries, {
-                        model = child,
-                        proximity = proximity,
-                        ownerValue = ownerValue,
-                        ownerText = ownerText,
-                        prompt = prompt,
-                        isOwned = isOwned,
-                    })
+    for _, child in ipairs(standFolder:GetChildren()) do
+        local index = tonumber(child.Name)
+        if child:IsA("Model") and index and index >= 1 and index <= 30 then
+            local proximity, ownerValue, prompt = findStandProximity(child)
+            if proximity then
+                local ownerText = ""
+                local isOwned = false
+                if ownerValue and ownerValue:IsA("StringValue") then
+                    ownerText = tostring(ownerValue.Value or "")
+                    isOwned = ownerText ~= ""
                 end
+
+                table.insert(entries, {
+                    model = child,
+                    proximity = proximity,
+                    ownerValue = ownerValue,
+                    ownerText = ownerText,
+                    prompt = prompt,
+                    isOwned = isOwned,
+                })
             end
         end
     end
@@ -210,13 +239,13 @@ local function findTargetServer()
     return nil
 end
 
-local function queueHop()
-    if not state.autoHop then
+local function queueHop(force)
+    if not state.autoHop and not force then
         return false
     end
 
     local currentCount = getServerPlayerCount()
-    if currentCount >= state.minPlayers then
+    if not force and currentCount >= state.minPlayers then
         return false
     end
 
@@ -254,22 +283,13 @@ local function startHopLoop()
                 end
 
                 if state.autoHop then
-                    queueHop()
+                    queueHop(false)
                 end
             end
         end
         task.wait(1)
     end
 end
-
-mainTab:CreateButton({
-    name = "Hop Now",
-    callback = function()
-        task.spawn(function()
-            queueHop()
-        end)
-    end,
-})
 
 mainTab:CreateButton({
     name = "Claim Best Unowned Stand",
@@ -287,14 +307,23 @@ mainTab:CreateToggle({
     end,
 })
 
-mainTab:CreateToggle({
+serverHopTab:CreateButton({
+    name = "Hop Now",
+    callback = function()
+        task.spawn(function()
+            queueHop(true)
+        end)
+    end,
+})
+
+serverHopTab:CreateToggle({
     name = "Auto Hop",
     callback = function(value)
         state.autoHop = value
     end,
 })
 
-settingsTab:CreateSlider({
+serverHopTab:CreateSlider({
     name = "Hop timer (seconds)",
     min = 1,
     max = 30,
@@ -304,7 +333,7 @@ settingsTab:CreateSlider({
     end,
 })
 
-settingsTab:CreateSlider({
+serverHopTab:CreateSlider({
     name = "Hop below players",
     min = 1,
     max = 25,
@@ -314,7 +343,7 @@ settingsTab:CreateSlider({
     end,
 })
 
-settingsTab:CreateSlider({
+serverHopTab:CreateSlider({
     name = "Hops per action",
     min = 1,
     max = 30,
