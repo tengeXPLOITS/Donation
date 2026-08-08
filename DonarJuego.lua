@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local PLACE_ID = 6136825413
 local SEARCH_MIN = 19
@@ -36,6 +37,7 @@ local state = {
     minPlayers = DEFAULT_MIN_PLAYERS,
     webhookUrl = "",
     hopCount = 1,
+    claimInProgress = false,
 }
 
 local function getServerPlayerCount()
@@ -205,14 +207,36 @@ local function findBestStand()
     return entries[1]
 end
 
+local function triggerEditPlotClaim(standName)
+    local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
+    if not eventsFolder then
+        return false
+    end
+
+    local editPlotEvent = eventsFolder:FindFirstChild("EditPlot")
+    if not editPlotEvent or not editPlotEvent:IsA("RemoteEvent") then
+        return false
+    end
+
+    local ok = pcall(function()
+        editPlotEvent:FireServer(tostring(standName), false)
+    end)
+
+    return ok
+end
+
 local function claimBestStand()
+    state.claimInProgress = true
+
     local standEntry = findBestStand()
     if not standEntry then
+        state.claimInProgress = false
         window:Notify({ title = "Donation Hub", content = "No stands found in the Stands folder." })
         return false
     end
 
     if standEntry.isOwned then
+        state.claimInProgress = false
         window:Notify({ title = "Donation Hub", content = string.format("%s is already owned by %s.", tostring(standEntry.model.Name), standEntry.ownerText ~= "" and standEntry.ownerText or "someone") })
         return false
     end
@@ -243,6 +267,14 @@ local function claimBestStand()
 
     task.wait(0.1)
 
+    local standName = tostring(standEntry.model.Name or "")
+    local eventTriggered = triggerEditPlotClaim(standName)
+    if eventTriggered then
+        state.claimInProgress = false
+        window:Notify({ title = "Donation Hub", content = string.format("Triggered claim for %s.", standName) })
+        return true
+    end
+
     if standEntry.prompt then
         local ok = pcall(function()
             standEntry.prompt.Enabled = true
@@ -250,12 +282,14 @@ local function claimBestStand()
             standEntry.prompt:InputHoldEnd()
         end)
         if ok then
-            window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", tostring(standEntry.model.Name)) })
+            state.claimInProgress = false
+            window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", standName) })
             return true
         end
     end
 
-    window:Notify({ title = "Donation Hub", content = string.format("Found %s but the prompt could not be triggered.", tostring(standEntry.model.Name)) })
+    state.claimInProgress = false
+    window:Notify({ title = "Donation Hub", content = string.format("Found %s but the claim event could not be triggered.", standName) })
     return false
 end
 
@@ -303,13 +337,19 @@ local function findTargetServer()
 end
 
 local function queueHop(force)
+    if state.claimInProgress then
+        return false
+    end
+
     if not force and not state.autoHop then
         return false
     end
 
-    local currentCount = getServerPlayerCount()
-    if not force and currentCount >= state.minPlayers then
-        return false
+    if not force then
+        local currentCount = getServerPlayerCount()
+        if currentCount >= state.minPlayers then
+            return false
+        end
     end
 
     local targetId, targetCount = findTargetServer()
