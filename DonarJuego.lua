@@ -190,7 +190,7 @@ local function waitForArrival(rootPart, targetPosition)
     end
 
     local start = os.clock()
-    while os.clock() - start < 0.6 do
+    while os.clock() - start < 1.2 do
         if rootPart and rootPart:IsA("BasePart") and targetPosition then
             if (rootPart.Position - targetPosition).Magnitude <= 4 then
                 return true
@@ -202,7 +202,26 @@ local function waitForArrival(rootPart, targetPosition)
     return false
 end
 
-local function triggerEditPlotClaim(standName)
+local function getStandNumber(standEntry)
+    if not standEntry or not standEntry.model then
+        return nil
+    end
+
+    local name = tostring(standEntry.model.Name or "")
+    local number = tonumber(name)
+    if number then
+        return number
+    end
+
+    local match = string.match(name, "(%d+)")
+    if match then
+        return tonumber(match)
+    end
+
+    return nil
+end
+
+local function triggerEditPlotClaim(standNumber, standName)
     local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
     if not eventsFolder then
         return false
@@ -213,37 +232,59 @@ local function triggerEditPlotClaim(standName)
         return false
     end
 
-    local candidates = {
-        { tostring(standName), false },
-        { tostring(standName), true },
-        { tonumber(standName), false },
-        { tonumber(standName), true },
-        { standName, false },
-        { standName, true },
-    }
+    local candidates = {}
+    if standNumber ~= nil then
+        table.insert(candidates, { standNumber, false })
+        table.insert(candidates, { standNumber, true })
+        table.insert(candidates, { standNumber })
+    end
 
-    if editPlotEvent:IsA("RemoteEvent") then
-        for _, args in ipairs(candidates) do
-            local ok = pcall(function()
-                editPlotEvent:FireServer(args[1], args[2])
-            end)
-            if ok then
-                return true
-            end
-        end
+    if standName and standName ~= "" then
+        table.insert(candidates, { tostring(standName), false })
+        table.insert(candidates, { tostring(standName), true })
+        table.insert(candidates, { tostring(standName) })
+    end
+
+    if #candidates == 0 then
         return false
     end
 
-    if editPlotEvent:IsA("RemoteFunction") then
+    local function invokeWithArgs(args)
+        if editPlotEvent:IsA("RemoteEvent") then
+            if #args == 0 then
+                return true
+            elseif #args == 1 then
+                editPlotEvent:FireServer(args[1])
+            else
+                editPlotEvent:FireServer(args[1], args[2])
+            end
+            return true
+        end
+
+        if editPlotEvent:IsA("RemoteFunction") then
+            if #args == 0 then
+                return true
+            elseif #args == 1 then
+                return editPlotEvent:InvokeServer(args[1])
+            end
+            return editPlotEvent:InvokeServer(args[1], args[2])
+        end
+
+        return false
+    end
+
+    for attempt = 1, 3 do
         for _, args in ipairs(candidates) do
-            local ok, result = pcall(function()
-                return editPlotEvent:InvokeServer(args[1], args[2])
+            local ok = pcall(function()
+                invokeWithArgs(args)
             end)
             if ok then
                 return true
             end
         end
-        return false
+        if attempt < 3 then
+            task.wait(0.15)
+        end
     end
 
     return false
@@ -290,27 +331,46 @@ local function claimBestStand()
     end
 
     local standName = tostring(standEntry.model.Name or "")
+    local standNumber = getStandNumber(standEntry)
     local arrived = waitForArrival(rootPart, targetPosition)
     if not arrived then
         state.claimInProgress = false
-        window:Notify({ title = "Donation Hub", content = string.format("Arrived too late for %s.", standName) })
+        window:Notify({ title = "Donation Hub", content = string.format("Teleport did not finish for %s.", standName) })
         return false
     end
 
-    local eventTriggered = triggerEditPlotClaim(standName)
+    task.wait(0.15)
 
-    if standEntry.prompt then
-        local ok = pcall(function()
-            standEntry.prompt.Enabled = true
-            standEntry.prompt:InputHoldBegin()
-            task.wait(0.1)
-            standEntry.prompt:InputHoldEnd()
-        end)
-        if ok then
-            state.claimInProgress = false
-            window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", standName) })
-            return true
+    local eventTriggered = false
+    for attempt = 1, 3 do
+        eventTriggered = triggerEditPlotClaim(standNumber, standName)
+        if eventTriggered then
+            break
         end
+        task.wait(0.15)
+    end
+
+    local promptTriggered = false
+    if standEntry.prompt then
+        for attempt = 1, 3 do
+            local ok = pcall(function()
+                standEntry.prompt.Enabled = true
+                standEntry.prompt:InputHoldBegin()
+                task.wait(0.1)
+                standEntry.prompt:InputHoldEnd()
+            end)
+            if ok then
+                promptTriggered = true
+                break
+            end
+            task.wait(0.15)
+        end
+    end
+
+    if promptTriggered then
+        state.claimInProgress = false
+        window:Notify({ title = "Donation Hub", content = string.format("Claimed %s.", standName) })
+        return true
     end
 
     if eventTriggered then
