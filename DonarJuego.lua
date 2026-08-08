@@ -4,9 +4,10 @@ local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
 
 local PLACE_ID = 6136825413
-local SEARCH_MIN = 1
-local SEARCH_MAX = 25
-local DEFAULT_MIN_PLAYERS = 20
+local SEARCH_MIN = 19
+local SEARCH_MAX = 23
+local DEFAULT_MIN_PLAYERS = 13
+local DEFAULT_HOP_TIMER = 10
 
 local player = Players.LocalPlayer
 local success, Rayfield = pcall(function()
@@ -30,9 +31,10 @@ local settingsTab = window:CreateTab({ name = "Settings", icon = 0 })
 local state = {
     autoWalk = true,
     autoHop = true,
-    hopTimer = 20,
+    hopTimer = DEFAULT_HOP_TIMER,
     minPlayers = DEFAULT_MIN_PLAYERS,
     webhookUrl = "",
+    hopCount = 1,
 }
 
 local function getServerPlayerCount()
@@ -60,8 +62,9 @@ local function getStandEntries()
     end
 
     local entries = {}
-    for _, child in ipairs(standFolder:GetChildren()) do
-        if child:IsA("Model") then
+    for i = 1, 30 do
+        local child = standFolder:FindFirstChild(tostring(i))
+        if child and child:IsA("Model") then
             local sign = child:FindFirstChild("sign")
             if sign and sign:IsA("Model") then
                 local proximity = sign:FindFirstChild("Proximity")
@@ -97,7 +100,7 @@ local function getStandEntries()
         if a.isOwned ~= b.isOwned then
             return not a.isOwned
         end
-        return tostring(a.model.Name) < tostring(b.model.Name)
+        return tonumber(a.model.Name or 0) < tonumber(b.model.Name or 0)
     end)
 
     return entries
@@ -209,13 +212,11 @@ end
 
 local function queueHop()
     if not state.autoHop then
-        window:Notify({ title = "Donation Hub", content = "Auto Hop is disabled." })
         return false
     end
 
     local currentCount = getServerPlayerCount()
     if currentCount >= state.minPlayers then
-        window:Notify({ title = "Donation Hub", content = string.format("Server has %d players, no hop needed.", currentCount) })
         return false
     end
 
@@ -293,29 +294,33 @@ mainTab:CreateToggle({
     end,
 })
 
-settingsTab:CreateInput({
+settingsTab:CreateSlider({
     name = "Hop timer (seconds)",
-    placeholder = "20",
-    callback = function(text)
-        local newValue = tonumber(text)
-        if newValue then
-            state.hopTimer = math.max(5, math.floor(newValue))
-        else
-            state.hopTimer = 20
-        end
+    min = 1,
+    max = 30,
+    value = DEFAULT_HOP_TIMER,
+    callback = function(value)
+        state.hopTimer = math.max(1, math.floor(value))
     end,
 })
 
-settingsTab:CreateInput({
-    name = "Min players",
-    placeholder = tostring(DEFAULT_MIN_PLAYERS),
-    callback = function(text)
-        local newValue = tonumber(text)
-        if newValue then
-            state.minPlayers = math.max(1, math.floor(newValue))
-        else
-            state.minPlayers = DEFAULT_MIN_PLAYERS
-        end
+settingsTab:CreateSlider({
+    name = "Hop below players",
+    min = 1,
+    max = 25,
+    value = DEFAULT_MIN_PLAYERS,
+    callback = function(value)
+        state.minPlayers = math.max(1, math.floor(value))
+    end,
+})
+
+settingsTab:CreateSlider({
+    name = "Hops per action",
+    min = 1,
+    max = 30,
+    value = 1,
+    callback = function(value)
+        state.hopCount = math.max(1, math.floor(value))
     end,
 })
 
