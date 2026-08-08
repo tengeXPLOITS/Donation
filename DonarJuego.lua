@@ -84,14 +84,56 @@ local function findStandProximity(model)
     end
 
     for _, candidate in ipairs(candidates) do
-        local ownerValue = candidate:FindFirstChild("Owner")
         local prompt = candidate:FindFirstChildOfClass("ProximityPrompt")
-        if ownerValue or prompt then
-            return candidate, ownerValue, prompt
+        if prompt then
+            return candidate, nil, prompt
         end
     end
 
-    return nil
+    for _, candidate in ipairs(candidates) do
+        local ownerValue = candidate:FindFirstChild("Owner")
+        if ownerValue then
+            return candidate, ownerValue, nil
+        end
+    end
+
+    return candidates[1], nil, nil
+end
+
+local function getOwnerInfo(container)
+    local ownerValue = nil
+    local ownerText = ""
+
+    local function scan(obj)
+        if not obj then
+            return
+        end
+
+        if obj.Name == "Owner" then
+            ownerValue = obj
+            if obj:IsA("StringValue") then
+                ownerText = tostring(obj.Value or "")
+            elseif obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") then
+                ownerText = tostring(obj.Value or "")
+            elseif obj:IsA("ObjectValue") then
+                ownerText = obj.Value and tostring(obj.Value) or ""
+            end
+            return true
+        end
+
+        for _, child in ipairs(obj:GetChildren()) do
+            if scan(child) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    scan(container)
+
+    local isOwned = ownerValue ~= nil and ownerText ~= "" and ownerText ~= "nil"
+    return ownerValue, ownerText, isOwned
 end
 
 local function getStandEntries()
@@ -101,29 +143,33 @@ local function getStandEntries()
     end
 
     local entries = {}
-    for _, child in ipairs(standFolder:GetChildren()) do
-        local index = tonumber(child.Name)
-        if child:IsA("Model") and index and index >= 1 and index <= 30 then
-            local proximity, ownerValue, prompt = findStandProximity(child)
-            if proximity then
-                local ownerText = ""
-                local isOwned = false
-                if ownerValue and ownerValue:IsA("StringValue") then
-                    ownerText = tostring(ownerValue.Value or "")
-                    isOwned = ownerText ~= ""
+    local function scan(container)
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Model") then
+                local index = tonumber(child.Name)
+                if index and index >= 1 and index <= 30 then
+                    local proximity, ownerValue, prompt = findStandProximity(child)
+                    if proximity then
+                        local _, ownerText, isOwned = getOwnerInfo(child)
+                        table.insert(entries, {
+                            model = child,
+                            proximity = proximity,
+                            ownerValue = ownerValue,
+                            ownerText = ownerText,
+                            prompt = prompt,
+                            isOwned = isOwned,
+                        })
+                    end
                 end
+            end
 
-                table.insert(entries, {
-                    model = child,
-                    proximity = proximity,
-                    ownerValue = ownerValue,
-                    ownerText = ownerText,
-                    prompt = prompt,
-                    isOwned = isOwned,
-                })
+            if child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart") then
+                scan(child)
             end
         end
     end
+
+    scan(standFolder)
 
     table.sort(entries, function(a, b)
         if a.isOwned ~= b.isOwned then
@@ -168,25 +214,25 @@ local function claimBestStand()
     local targetPosition = standEntry.proximity and standEntry.proximity.Position or nil
 
     if rootPart and targetPosition then
+        local targetCFrame = CFrame.new(targetPosition + Vector3.new(0, 4, 0))
         pcall(function()
-            rootPart.CFrame = CFrame.new(targetPosition + Vector3.new(0, 4, 0))
-        end)
-    end
-
-    if humanoid and rootPart and targetPosition then
-        pcall(function()
-            if humanoid and humanoid:IsA("Humanoid") then
-                humanoid:MoveTo(targetPosition)
+            if character and character:IsA("Model") then
+                character:PivotTo(targetCFrame)
             end
-            task.wait(0.2)
         end)
+
+        pcall(function()
+            rootPart.CFrame = targetCFrame
+        end)
+
+        if humanoid and humanoid:IsA("Humanoid") then
+            pcall(function()
+                humanoid:MoveTo(targetPosition)
+            end)
+        end
     end
 
-    if rootPart and targetPosition then
-        pcall(function()
-            rootPart.CFrame = CFrame.new(targetPosition + Vector3.new(0, 4, 0))
-        end)
-    end
+    task.wait(0.1)
 
     if standEntry.prompt then
         local ok = pcall(function()
