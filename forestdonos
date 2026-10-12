@@ -196,7 +196,7 @@ local function claimAndGoToStand(slot, forceClaim)
         if not positioned then
             return false, positionError
         end
-        task.wait()
+        task.wait(0.5)
 
         local remote = getClaimRemote()
         if not remote then
