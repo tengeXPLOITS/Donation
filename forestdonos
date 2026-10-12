@@ -13,6 +13,7 @@ local Workspace = game:GetService("Workspace")
 local COMMUNITY_ID = 35401545
 local SERVER_HOP_PLACE_ID = 122345940779204
 local SCRIPT_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/refs/heads/main/forestdonos"
+local AUTO_HOP_SETTINGS_FILE = "forestdonos_settings.json"
 local LocalPlayer = Players.LocalPlayer
 
 local isCommunityPlace = game.CreatorType == Enum.CreatorType.Group and game.CreatorId == COMMUNITY_ID
@@ -39,12 +40,121 @@ local function notify(text)
     end)
 end
 
+local function getExecutorEnv()
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then
+            return env
+        end
+    end
+    if type(getfenv) == "function" then
+        local ok, env = pcall(getfenv)
+        if ok and type(env) == "table" then
+            return env
+        end
+    end
+    return _G
+end
+
+local function getExecutorFunction(name)
+    local env = getExecutorEnv()
+    local candidate = rawget(env, name) or rawget(_G, name)
+    if type(candidate) == "function" then
+        return candidate
+    end
+    local synApi = rawget(env, "syn")
+    candidate = synApi and rawget(synApi, name)
+    if not candidate and name == "writefile" and type(synApi) == "table" then
+        candidate = rawget(synApi, "write_file")
+    end
+    if type(candidate) == "function" then
+        return candidate
+    end
+    return nil
+end
+
+local function isValidAutoHopState(state)
+    return type(state) == "table"
+        and type(state.Enabled) == "boolean"
+        and tonumber(state.MinPlayers) ~= nil
+        and tonumber(state.MaxPlayers) ~= nil
+        and tonumber(state.IntervalMinutes) ~= nil
+        and tonumber(state.MinPlayers) >= 0
+        and tonumber(state.MaxPlayers) >= tonumber(state.MinPlayers)
+        and tonumber(state.IntervalMinutes) >= 1
+        and tonumber(state.IntervalMinutes) <= 1440
+        and (state.PopulationEnabled == nil or type(state.PopulationEnabled) == "boolean")
+        and (state.PopulationThreshold == nil
+            or (tonumber(state.PopulationThreshold) ~= nil and tonumber(state.PopulationThreshold) >= 1))
+end
+
+local function loadAutoHopState()
+    local readFile = getExecutorFunction("readfile")
+    if readFile then
+        local readOk, contents = pcall(readFile, AUTO_HOP_SETTINGS_FILE)
+        if readOk and type(contents) == "string" then
+            local decodeOk, state = pcall(function()
+                return HttpService:JSONDecode(contents)
+            end)
+            if decodeOk and isValidAutoHopState(state) then
+                return {
+                    Enabled = state.Enabled,
+                    MinPlayers = tonumber(state.MinPlayers),
+                    MaxPlayers = tonumber(state.MaxPlayers),
+                    IntervalMinutes = tonumber(state.IntervalMinutes),
+                    PopulationEnabled = state.PopulationEnabled == true,
+                    PopulationThreshold = tonumber(state.PopulationThreshold) or 10,
+                }
+            elseif decodeOk then
+                warn("[Forest Donations] Saved auto-hop settings are invalid; using runtime settings.")
+            else
+                warn("[Forest Donations] Could not decode saved auto-hop settings: " .. tostring(state))
+            end
+        end
+    end
+
+    local runtimeState = rawget(getExecutorEnv(), "__ForestDonationsAutoHop")
+    if isValidAutoHopState(runtimeState) then
+        return {
+            Enabled = runtimeState.Enabled,
+            MinPlayers = tonumber(runtimeState.MinPlayers),
+            MaxPlayers = tonumber(runtimeState.MaxPlayers),
+            IntervalMinutes = tonumber(runtimeState.IntervalMinutes),
+            PopulationEnabled = runtimeState.PopulationEnabled == true,
+            PopulationThreshold = tonumber(runtimeState.PopulationThreshold) or 10,
+        }
+    end
+    return nil
+end
+
+local function saveAutoHopState(state)
+    local env = getExecutorEnv()
+    rawset(env, "__ForestDonationsAutoHop", state)
+    local writeFile = getExecutorFunction("writefile")
+    if not writeFile then
+        return false, "writefile is not available; settings only persist for this executor session."
+    end
+
+    local encodeOk, contents = pcall(function()
+        return HttpService:JSONEncode(state)
+    end)
+    if not encodeOk then
+        return false, "Could not encode auto-hop settings: " .. tostring(contents)
+    end
+
+    local writeOk, writeResult = pcall(writeFile, AUTO_HOP_SETTINGS_FILE, contents)
+    if not writeOk or writeResult == false then
+        return false, "Could not save " .. AUTO_HOP_SETTINGS_FILE .. ": " .. tostring(writeResult)
+    end
+    return true
+end
+
 local function getHttpRequest()
-    local synApi = rawget(getfenv(), "syn")
+    local env = getExecutorEnv()
+    local synApi = rawget(env, "syn")
     if synApi and synApi.request then return synApi.request end
-    local httpApi = rawget(getfenv(), "http")
+    local httpApi = rawget(env, "http")
     if httpApi and httpApi.request then return httpApi.request end
-    local env = getfenv()
     if env.http_request then return env.http_request end
     if env.request then return env.request end
     return nil
@@ -123,6 +233,8 @@ local function requestServerPage(url)
 end
 
 local queueAutoHopUiReload
+local setAutoHopState
+local setPopulationHopState
 
 local function serverHop(minPlayers, maxPlayers)
     local cursor = nil
@@ -172,9 +284,9 @@ local function serverHop(minPlayers, maxPlayers)
     end
 
     local target = candidates[math.random(1, #candidates)]
-    local env = type(getfenv) == "function" and getfenv() or _G
-    local savedState = rawget(env, "__ForestDonationsAutoHop")
+    local savedState = loadAutoHopState()
     local autoHopActive = type(savedState) == "table" and savedState.Enabled == true
+    local populationHopActive = type(savedState) == "table" and savedState.PopulationEnabled == true
     local persistMin = autoHopActive and tonumber(savedState.MinPlayers) or minPlayers
     local persistMax = autoHopActive and tonumber(savedState.MaxPlayers) or maxPlayers
     local persistInterval = autoHopActive and tonumber(savedState.IntervalMinutes) or 30
@@ -184,8 +296,12 @@ local function serverHop(minPlayers, maxPlayers)
         persistMax,
         persistInterval
     )
-    if not queued then
+    if not queued and (autoHopActive or populationHopActive) then
         return false, "Could not prepare the UI reload before teleport: " .. tostring(queueError)
+    end
+    if not queued then
+        warn("[Forest Donations] The hop will continue, but the UI cannot auto-reload: "
+            .. tostring(queueError))
     end
 
     local ok, teleportError = pcall(function()
@@ -198,7 +314,7 @@ local function serverHop(minPlayers, maxPlayers)
 end
 
 local function getQueueOnTeleport()
-    local env = type(getfenv) == "function" and getfenv() or _G
+    local env = getExecutorEnv()
     local queueFunctions = {}
     local function addQueue(candidate)
         if type(candidate) == "function" then
@@ -219,42 +335,33 @@ local function getQueueOnTeleport()
 end
 
 local function buildAutoHopQueueCode(enabled, minPlayers, maxPlayers, intervalMinutes)
+    local savedState = loadAutoHopState()
+    local populationEnabled = savedState and savedState.PopulationEnabled == true or false
+    local populationThreshold = savedState and savedState.PopulationThreshold or 10
     return ([[
-local env = type(getfenv) == "function" and getfenv() or _G
+local env = type(getgenv) == "function" and getgenv()
+    or (type(getfenv) == "function" and getfenv() or _G)
 rawset(env, "__ForestDonationsAutoHop", {
     Enabled = %s,
     MinPlayers = %d,
     MaxPlayers = %d,
     IntervalMinutes = %d,
+    PopulationEnabled = %s,
+    PopulationThreshold = %d,
 })
-repeat
-    task.wait()
-until game:IsLoaded()
-local fetchOk, source = pcall(function()
-    return game:HttpGet(%q)
+local ok, err = pcall(function()
+    loadstring(game:HttpGet(%q))()
 end)
-if not fetchOk then
-    warn("[Forest Donations] Could not fetch the UI after teleport: " .. tostring(source))
-    return
-end
-local compileOk, loader, loadError = pcall(loadstring, source)
-if not compileOk then
-    warn("[Forest Donations] Could not compile the UI after teleport: " .. tostring(loader))
-    return
-end
-if not loader then
-    warn("[Forest Donations] Could not compile the UI after teleport: " .. tostring(loadError))
-    return
-end
-local runOk, runError = pcall(loader)
-if not runOk then
-    warn("[Forest Donations] UI failed after teleport: " .. tostring(runError))
+if not ok then
+    warn("[Forest Donations] Could not execute the UI after teleport: " .. tostring(err))
 end
 ]]):format(
         tostring(enabled),
         minPlayers,
         maxPlayers,
         intervalMinutes,
+        tostring(populationEnabled),
+        populationThreshold,
         SCRIPT_URL
     )
 end
@@ -507,8 +614,8 @@ screenGui.Parent = playerGui
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(360, 320)
-panel.Position = UDim2.new(0.5, -180, 0.5, -160)
+panel.Size = UDim2.fromOffset(360, 350)
+panel.Position = UDim2.new(0.5, -180, 0.5, -175)
 panel.BackgroundColor3 = Color3.fromRGB(48, 48, 52)
 panel.BorderSizePixel = 0
 panel.Parent = screenGui
@@ -637,6 +744,8 @@ subtitle.TextSize = 14
 subtitle.TextXAlignment = Enum.TextXAlignment.Left
 subtitle.Parent = boothPage
 
+local persistedAutoHopSettings = loadAutoHopState()
+
 local standBox = Instance.new("TextBox")
 standBox.Name = "StandNumber"
 standBox.Size = UDim2.fromOffset(76, 34)
@@ -677,6 +786,59 @@ status.TextWrapped = true
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextYAlignment = Enum.TextYAlignment.Top
 status.Parent = boothPage
+
+local populationSubtitle = Instance.new("TextLabel")
+populationSubtitle.Name = "PopulationHopSubtitle"
+populationSubtitle.Size = UDim2.new(1, -24, 0, 22)
+populationSubtitle.Position = UDim2.fromOffset(12, 150)
+populationSubtitle.BackgroundTransparency = 1
+populationSubtitle.Text = "Population hopper"
+populationSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
+populationSubtitle.Font = Enum.Font.GothamBold
+populationSubtitle.TextSize = 14
+populationSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+populationSubtitle.Parent = boothPage
+
+local populationThresholdBox = Instance.new("TextBox")
+populationThresholdBox.Name = "PopulationThreshold"
+populationThresholdBox.Size = UDim2.fromOffset(76, 34)
+populationThresholdBox.Position = UDim2.fromOffset(12, 176)
+populationThresholdBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+populationThresholdBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+populationThresholdBox.PlaceholderText = "Below #"
+populationThresholdBox.Text = persistedAutoHopSettings
+    and tostring(persistedAutoHopSettings.PopulationThreshold) or "10"
+populationThresholdBox.ClearTextOnFocus = false
+populationThresholdBox.Font = Enum.Font.Gotham
+populationThresholdBox.TextSize = 14
+populationThresholdBox.Parent = boothPage
+Instance.new("UICorner", populationThresholdBox).CornerRadius = UDim.new(0, 6)
+
+local populationHopButton = Instance.new("TextButton")
+populationHopButton.Name = "PopulationHopButton"
+populationHopButton.Size = UDim2.fromOffset(196, 34)
+populationHopButton.Position = UDim2.fromOffset(96, 176)
+populationHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+populationHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+populationHopButton.Text = "Population Hop: OFF"
+populationHopButton.Font = Enum.Font.GothamBold
+populationHopButton.TextSize = 13
+populationHopButton.Parent = boothPage
+Instance.new("UICorner", populationHopButton).CornerRadius = UDim.new(0, 6)
+
+local populationHopStatus = Instance.new("TextLabel")
+populationHopStatus.Name = "PopulationHopStatus"
+populationHopStatus.Size = UDim2.new(1, -24, 0, 46)
+populationHopStatus.Position = UDim2.fromOffset(12, 216)
+populationHopStatus.BackgroundTransparency = 1
+populationHopStatus.Text = "Hops when this server drops below the threshold; destination uses Server Hop Min/Max."
+populationHopStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
+populationHopStatus.Font = Enum.Font.Gotham
+populationHopStatus.TextSize = 12
+populationHopStatus.TextWrapped = true
+populationHopStatus.TextXAlignment = Enum.TextXAlignment.Left
+populationHopStatus.TextYAlignment = Enum.TextYAlignment.Top
+populationHopStatus.Parent = boothPage
 
 local hopSubtitle = Instance.new("TextLabel")
 hopSubtitle.Size = UDim2.new(1, -24, 0, 24)
@@ -824,6 +986,19 @@ hopButton.MouseButton1Click:Connect(function()
         return
     end
 
+    local previousState = loadAutoHopState()
+    local intervalMinutes = previousState and previousState.IntervalMinutes
+        or tonumber(autoIntervalBox.Text) or 30
+    local settingsSaved, settingsError = setAutoHopState(
+        previousState and previousState.Enabled == true or false,
+        minPlayers,
+        maxPlayers,
+        intervalMinutes
+    )
+    if not settingsSaved then
+        warn("[Forest Donations] " .. tostring(settingsError))
+    end
+
     hopping = true
     hopButton.Active = false
     hopButton.Text = "Searching..."
@@ -836,6 +1011,9 @@ hopButton.MouseButton1Click:Connect(function()
             message = "Unexpected server hop error: " .. tostring(hopError)
         end
         hopStatus.Text = tostring(message)
+        if not settingsSaved then
+            hopStatus.Text = hopStatus.Text .. " Settings were not saved: " .. tostring(settingsError)
+        end
         notify(message)
         if joined then
             print("[Forest Donations] " .. tostring(message))
@@ -849,10 +1027,10 @@ hopButton.MouseButton1Click:Connect(function()
 end)
 
 local autoHopEnabled = false
+local populationHopEnabled = false
 local autoHopGeneration = 0
-local autoHopStateEnv = type(getfenv) == "function" and getfenv() or _G
-local savedAutoHopState = rawget(autoHopStateEnv, "__ForestDonationsAutoHop")
-if type(savedAutoHopState) == "table" and savedAutoHopState.Enabled == true then
+local savedAutoHopState = persistedAutoHopSettings or loadAutoHopState()
+if savedAutoHopState then
     local savedMin = tonumber(savedAutoHopState.MinPlayers)
     local savedMax = tonumber(savedAutoHopState.MaxPlayers)
     local savedInterval = tonumber(savedAutoHopState.IntervalMinutes)
@@ -860,23 +1038,42 @@ if type(savedAutoHopState) == "table" and savedAutoHopState.Enabled == true then
         minPlayersBox.Text = tostring(savedMin)
         maxPlayersBox.Text = tostring(savedMax)
         autoIntervalBox.Text = tostring(savedInterval)
-        autoHopEnabled = true
+        autoHopEnabled = savedAutoHopState.Enabled
+    end
+    populationHopEnabled = savedAutoHopState.PopulationEnabled == true
+    populationThresholdBox.Text = tostring(savedAutoHopState.PopulationThreshold or 10)
+    if autoHopEnabled then
         autoHopButton.Text = "Auto Hop: ON"
         autoHopButton.BackgroundColor3 = Color3.fromRGB(72, 120, 82)
     end
+    if populationHopEnabled then
+        populationHopButton.Text = "Population Hop: ON"
+        populationHopButton.BackgroundColor3 = Color3.fromRGB(72, 120, 82)
+    end
 end
 
-local function setAutoHopState(enabled, minPlayers, maxPlayers, intervalMinutes)
-    local env = type(getfenv) == "function" and getfenv() or _G
-    local state = rawget(env, "__ForestDonationsAutoHop")
-    if type(state) ~= "table" then
-        state = {}
-        rawset(env, "__ForestDonationsAutoHop", state)
-    end
-    state.Enabled = enabled
-    state.MinPlayers = minPlayers
-    state.MaxPlayers = maxPlayers
-    state.IntervalMinutes = intervalMinutes
+setAutoHopState = function(enabled, minPlayers, maxPlayers, intervalMinutes)
+    local previous = loadAutoHopState()
+    return saveAutoHopState({
+        Enabled = enabled,
+        MinPlayers = minPlayers,
+        MaxPlayers = maxPlayers,
+        IntervalMinutes = intervalMinutes,
+        PopulationEnabled = previous and previous.PopulationEnabled == true or false,
+        PopulationThreshold = previous and previous.PopulationThreshold or 10,
+    })
+end
+
+setPopulationHopState = function(enabled, threshold, minPlayers, maxPlayers, intervalMinutes)
+    local previous = loadAutoHopState()
+    return saveAutoHopState({
+        Enabled = previous and previous.Enabled == true or false,
+        MinPlayers = minPlayers or (previous and previous.MinPlayers) or 0,
+        MaxPlayers = maxPlayers or (previous and previous.MaxPlayers) or 27,
+        IntervalMinutes = intervalMinutes or (previous and previous.IntervalMinutes) or 30,
+        PopulationEnabled = enabled,
+        PopulationThreshold = threshold,
+    })
 end
 
 queueAutoHopUiReload = function(enabled, minPlayers, maxPlayers, intervalMinutes)
@@ -892,11 +1089,8 @@ queueAutoHopUiReload = function(enabled, minPlayers, maxPlayers, intervalMinutes
         table.insert(queueErrors, tostring(result))
     end
 
-    local env = type(getfenv) == "function" and getfenv() or _G
-    local writeFile = rawget(env, "writefile")
-    local synApi = rawget(env, "syn")
-    writeFile = writeFile or (synApi and synApi.write_file)
-    if type(writeFile) == "function" then
+    local writeFile = getExecutorFunction("writefile")
+    if writeFile then
         local fileOk, fileError = pcall(writeFile, "forestdonos_queued.lua", queueCode)
         if fileOk then
             local fallbackCode = "dofile('forestdonos_queued.lua')"
@@ -970,6 +1164,179 @@ local function startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
     end)
 end
 
+local function startPopulationHopWorker()
+    task.spawn(function()
+        while populationHopEnabled do
+            local playerCount = #Players:GetPlayers()
+            local threshold = tonumber(populationThresholdBox.Text)
+            populationHopStatus.Text = ("Current server: %d players. Hop threshold: below %s.")
+                :format(playerCount, threshold and tostring(threshold) or "invalid")
+
+            if threshold and playerCount < threshold and not hopping then
+                local minPlayers = tonumber(minPlayersBox.Text)
+                local maxPlayers = tonumber(maxPlayersBox.Text)
+                if not minPlayers or not maxPlayers
+                    or minPlayers < 0 or maxPlayers < minPlayers
+                    or minPlayers % 1 ~= 0 or maxPlayers % 1 ~= 0 then
+                    populationHopStatus.Text = ("Current server has %d players, below %d. Set a valid Server Hop Min/Max range.")
+                        :format(playerCount, threshold)
+                else
+                    hopping = true
+                    hopButton.Active = false
+                    hopButton.Text = "Searching..."
+                    populationHopStatus.Text = ("Only %d players remain; searching for a destination in the configured range...")
+                        :format(playerCount)
+                    local savedState = loadAutoHopState()
+                    local settingsSaved, settingsError = setAutoHopState(
+                        savedState and savedState.Enabled == true or false,
+                        minPlayers,
+                        maxPlayers,
+                        savedState and savedState.IntervalMinutes or tonumber(autoIntervalBox.Text) or 30
+                    )
+                    local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+                    if not ok then
+                        message = "Unexpected population-hop error: " .. tostring(joined)
+                        joined = false
+                    end
+                    if not settingsSaved then
+                        message = tostring(message) .. " Settings were not saved: " .. tostring(settingsError)
+                    end
+                    populationHopStatus.Text = tostring(message)
+                    notify(message)
+                    if joined then
+                        print("[Forest Donations] " .. tostring(message))
+                        return
+                    end
+                    warn("[Forest Donations] " .. tostring(message))
+                    hopping = false
+                    hopButton.Active = true
+                    hopButton.Text = "Find & Join"
+                    task.wait(30)
+                end
+            end
+
+            task.wait(5)
+        end
+    end)
+end
+
+populationHopButton.MouseButton1Click:Connect(function()
+    if populationHopEnabled then
+        populationHopEnabled = false
+        local threshold = tonumber(populationThresholdBox.Text) or 10
+        local previous = loadAutoHopState()
+        local saved, saveError = setPopulationHopState(
+            false,
+            threshold,
+            previous and previous.MinPlayers,
+            previous and previous.MaxPlayers,
+            previous and previous.IntervalMinutes
+        )
+        populationHopButton.Text = "Population Hop: OFF"
+        populationHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+        populationHopStatus.Text = saved
+            and "Population hopper disabled; setting saved."
+            or ("Population hopper disabled locally. " .. tostring(saveError))
+        local state = loadAutoHopState()
+        local queued, queueError = queueAutoHopUiReload(
+            state and state.Enabled == true or false,
+            state and state.MinPlayers or tonumber(minPlayersBox.Text) or 0,
+            state and state.MaxPlayers or tonumber(maxPlayersBox.Text) or 27,
+            state and state.IntervalMinutes or tonumber(autoIntervalBox.Text) or 30
+        )
+        if not queued then
+            populationHopStatus.Text = populationHopStatus.Text .. " " .. tostring(queueError)
+        end
+        return
+    end
+
+    local threshold = tonumber(populationThresholdBox.Text)
+    if not threshold or threshold < 1 or threshold % 1 ~= 0 then
+        populationHopStatus.Text = "Enter a whole-number population threshold of at least 1."
+        return
+    end
+
+    local previous = loadAutoHopState()
+    local minPlayers = tonumber(minPlayersBox.Text)
+    local maxPlayers = tonumber(maxPlayersBox.Text)
+    if not minPlayers or not maxPlayers
+        or minPlayers < 0 or maxPlayers < minPlayers
+        or minPlayers % 1 ~= 0 or maxPlayers % 1 ~= 0 then
+        populationHopStatus.Text = "Set a valid Server Hop Min/Max range before enabling."
+        return
+    end
+    local intervalMinutes = previous and previous.IntervalMinutes
+        or tonumber(autoIntervalBox.Text) or 30
+    local saved, saveError = setPopulationHopState(
+        true,
+        threshold,
+        minPlayers,
+        maxPlayers,
+        intervalMinutes
+    )
+    if not saved then
+        populationHopStatus.Text = "Could not save population hopper settings: " .. tostring(saveError)
+        notify(populationHopStatus.Text)
+        return
+    end
+    local queued, queueError = queueAutoHopUiReload(
+        previous and previous.Enabled == true or false,
+        minPlayers,
+        maxPlayers,
+        intervalMinutes
+    )
+    if not queued then
+        setPopulationHopState(false, threshold)
+        populationHopStatus.Text = "Could not enable population hopping across servers: " .. tostring(queueError)
+        notify(populationHopStatus.Text)
+        return
+    end
+
+    populationHopEnabled = true
+    populationHopButton.Text = "Population Hop: ON"
+    populationHopButton.BackgroundColor3 = Color3.fromRGB(72, 120, 82)
+    populationHopStatus.Text = "Enabled. Hops when this server drops below the threshold."
+    startPopulationHopWorker()
+end)
+
+populationThresholdBox.FocusLost:Connect(function()
+    local threshold = tonumber(populationThresholdBox.Text)
+    if not threshold or threshold < 1 or threshold % 1 ~= 0 then
+        populationHopStatus.Text = "Enter a whole-number population threshold of at least 1."
+        return
+    end
+
+    if populationHopEnabled then
+        local state = loadAutoHopState()
+        local saved, saveError = setPopulationHopState(
+            true,
+            threshold,
+            tonumber(minPlayersBox.Text) or (state and state.MinPlayers),
+            tonumber(maxPlayersBox.Text) or (state and state.MaxPlayers),
+            state and state.IntervalMinutes
+        )
+        if not saved then
+            populationHopStatus.Text = "Threshold changed for this session only: " .. tostring(saveError)
+            return
+        end
+        state = loadAutoHopState()
+        local queued, queueError = queueAutoHopUiReload(
+            state.Enabled,
+            state.MinPlayers,
+            state.MaxPlayers,
+            state.IntervalMinutes
+        )
+        populationHopStatus.Text = queued
+            and ("Population threshold saved: %d players."):format(threshold)
+            or ("Threshold saved, but teleport reload could not be queued: " .. tostring(queueError))
+    else
+        local saved, saveError = setPopulationHopState(false, threshold)
+        populationHopStatus.Text = saved
+            and ("Population threshold saved: %d players."):format(threshold)
+            or ("Threshold changed for this session only: " .. tostring(saveError))
+    end
+end)
+
 autoHopButton.MouseButton1Click:Connect(function()
     if autoHopEnabled then
         autoHopEnabled = false
@@ -977,13 +1344,22 @@ autoHopButton.MouseButton1Click:Connect(function()
         local minPlayers = tonumber(minPlayersBox.Text) or 0
         local maxPlayers = tonumber(maxPlayersBox.Text) or minPlayers
         local intervalMinutes = tonumber(autoIntervalBox.Text) or 30
-        setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
+        local saved, saveError = setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
         local queued, queueError = queueAutoHopUiReload(false, minPlayers, maxPlayers, intervalMinutes)
         autoHopButton.Text = "Auto Hop: OFF"
         autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-        hopStatus.Text = queued
-            and "Auto hop disabled; the UI will reload after your next teleport."
-            or ("Auto hop disabled locally. " .. tostring(queueError))
+        local statusParts = {"Auto hop disabled."}
+        if queued then
+            table.insert(statusParts, "The UI will reload after your next teleport.")
+        else
+            table.insert(statusParts, tostring(queueError))
+        end
+        if not saved then
+            table.insert(statusParts, tostring(saveError))
+        else
+            table.insert(statusParts, "Settings saved to " .. AUTO_HOP_SETTINGS_FILE .. ".")
+        end
+        hopStatus.Text = table.concat(statusParts, " ")
         return
     end
 
@@ -1002,15 +1378,25 @@ autoHopButton.MouseButton1Click:Connect(function()
         return
     end
 
+    local settingsSaved, settingsError = setAutoHopState(true, minPlayers, maxPlayers, intervalMinutes)
     local queued, queueError = queueAutoHopUiReload(true, minPlayers, maxPlayers, intervalMinutes)
     if not queued then
+        setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
         hopStatus.Text = "Auto-hop across servers needs queue_on_teleport support. " .. tostring(queueError)
+        if not settingsSaved then
+            hopStatus.Text = hopStatus.Text .. " Settings were not saved: " .. tostring(settingsError)
+        end
         notify(hopStatus.Text)
         return
     end
 
-    setAutoHopState(true, minPlayers, maxPlayers, intervalMinutes)
     startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
+    if settingsSaved then
+        hopStatus.Text = hopStatus.Text .. " Settings saved to " .. AUTO_HOP_SETTINGS_FILE .. "."
+    else
+        hopStatus.Text = hopStatus.Text .. " Settings were not saved: " .. tostring(settingsError)
+        warn("[Forest Donations] " .. tostring(settingsError))
+    end
 end)
 
 if autoHopEnabled then
@@ -1022,11 +1408,35 @@ if autoHopEnabled then
         startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
     else
         autoHopEnabled = false
-        setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
+        local settingsSaved, settingsError = setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
         autoHopButton.Text = "Auto Hop: OFF"
         autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
         hopStatus.Text = "Auto-hop could not resume: " .. tostring(queueError)
+        if not settingsSaved then
+            hopStatus.Text = hopStatus.Text .. " Settings could not be saved: " .. tostring(settingsError)
+        end
         notify(hopStatus.Text)
+    end
+end
+
+if populationHopEnabled then
+    local state = loadAutoHopState()
+    local queued, queueError = queueAutoHopUiReload(
+        state and state.Enabled == true or false,
+        state and state.MinPlayers or tonumber(minPlayersBox.Text) or 0,
+        state and state.MaxPlayers or tonumber(maxPlayersBox.Text) or 27,
+        state and state.IntervalMinutes or tonumber(autoIntervalBox.Text) or 30
+    )
+    if queued then
+        startPopulationHopWorker()
+    else
+        populationHopEnabled = false
+        local threshold = tonumber(populationThresholdBox.Text) or 10
+        setPopulationHopState(false, threshold)
+        populationHopButton.Text = "Population Hop: OFF"
+        populationHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+        populationHopStatus.Text = "Population hopper could not resume: " .. tostring(queueError)
+        notify(populationHopStatus.Text)
     end
 end
 
