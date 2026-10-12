@@ -122,9 +122,26 @@ local function isValidAutoHopState(state)
         and (state.PopulationEnabled == nil or type(state.PopulationEnabled) == "boolean")
         and (state.PopulationThreshold == nil
             or (tonumber(state.PopulationThreshold) ~= nil and tonumber(state.PopulationThreshold) >= 1))
+        and (state.WebhookEnabled == nil or type(state.WebhookEnabled) == "boolean")
+        and (state.WebhookUrl == nil
+            or (type(state.WebhookUrl) == "string" and #state.WebhookUrl <= 512))
 end
 
 local function loadAutoHopState()
+    local runtimeState = rawget(getExecutorEnv(), "__ForestDonationsAutoHop")
+    if isValidAutoHopState(runtimeState) then
+        return {
+            Enabled = runtimeState.Enabled,
+            MinPlayers = tonumber(runtimeState.MinPlayers),
+            MaxPlayers = tonumber(runtimeState.MaxPlayers),
+            IntervalMinutes = tonumber(runtimeState.IntervalMinutes),
+            PopulationEnabled = runtimeState.PopulationEnabled == true,
+            PopulationThreshold = tonumber(runtimeState.PopulationThreshold) or 10,
+            WebhookEnabled = runtimeState.WebhookEnabled == true,
+            WebhookUrl = type(runtimeState.WebhookUrl) == "string" and runtimeState.WebhookUrl or "",
+        }
+    end
+
     local readFile = getExecutorFunction("readfile")
     if readFile then
         local readOk, contents = pcall(readFile, AUTO_HOP_SETTINGS_FILE)
@@ -140,6 +157,8 @@ local function loadAutoHopState()
                     IntervalMinutes = tonumber(state.IntervalMinutes),
                     PopulationEnabled = state.PopulationEnabled == true,
                     PopulationThreshold = tonumber(state.PopulationThreshold) or 10,
+                    WebhookEnabled = state.WebhookEnabled == true,
+                    WebhookUrl = type(state.WebhookUrl) == "string" and state.WebhookUrl or "",
                 }
             elseif decodeOk then
                 warn("[Forest Donations] Saved auto-hop settings are invalid; using runtime settings.")
@@ -147,18 +166,6 @@ local function loadAutoHopState()
                 warn("[Forest Donations] Could not decode saved auto-hop settings: " .. tostring(state))
             end
         end
-    end
-
-    local runtimeState = rawget(getExecutorEnv(), "__ForestDonationsAutoHop")
-    if isValidAutoHopState(runtimeState) then
-        return {
-            Enabled = runtimeState.Enabled,
-            MinPlayers = tonumber(runtimeState.MinPlayers),
-            MaxPlayers = tonumber(runtimeState.MaxPlayers),
-            IntervalMinutes = tonumber(runtimeState.IntervalMinutes),
-            PopulationEnabled = runtimeState.PopulationEnabled == true,
-            PopulationThreshold = tonumber(runtimeState.PopulationThreshold) or 10,
-        }
     end
     return nil
 end
@@ -194,6 +201,80 @@ local function getHttpRequest()
     if env.http_request then return env.http_request end
     if env.request then return env.request end
     return nil
+end
+
+local function isValidDiscordWebhookUrl(url)
+    return type(url) == "string"
+        and #url <= 512
+        and string.match(url, "^https://discord(app)?%.com/api/webhooks/%d+/[%w_-]+/?$") ~= nil
+end
+
+local function sendHopWebhook(target)
+    local settings = loadAutoHopState()
+    if not settings or settings.WebhookEnabled ~= true then
+        return true
+    end
+
+    local webhookUrl = settings.WebhookUrl
+    if not isValidDiscordWebhookUrl(webhookUrl) then
+        return false, "Webhook is enabled, but its URL is invalid. Update it in the Webhook tab."
+    end
+
+    local payloadOk, payload = pcall(function()
+        return HttpService:JSONEncode({
+            content = ("Forest Donations: server hop initiated. Destination has %d/%d players.")
+                :format(tonumber(target.playing) or 0, tonumber(target.maxPlayers) or 0),
+            allowed_mentions = {parse = {}},
+        })
+    end)
+    if not payloadOk then
+        return false, "Could not encode the Discord webhook message: " .. tostring(payload)
+    end
+
+    local request = getHttpRequest()
+    if request then
+        local ok, response = pcall(request, {
+            Url = webhookUrl,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = payload,
+            Timeout = 8,
+        })
+        if not ok then
+            return false, "Discord webhook request failed; verify the URL and HTTP request access."
+        end
+        if type(response) ~= "table" then
+            return false, "Discord webhook returned no valid HTTP response."
+        end
+        local statusCode = tonumber(response.StatusCode or response.Status)
+        if not statusCode then
+            return false, "Discord webhook response did not include an HTTP status."
+        end
+        if statusCode < 200 or statusCode >= 300 then
+            return false, ("Discord webhook returned HTTP %d."):format(statusCode)
+        end
+        return true, "Discord hop notification sent."
+    end
+
+    local ok, response = pcall(function()
+        return HttpService:RequestAsync({
+            Url = webhookUrl,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = payload,
+        })
+    end)
+    if not ok then
+        return false, "Discord webhook request failed; verify the URL and HTTP request access."
+    end
+    local statusCode = type(response) == "table" and tonumber(response.StatusCode) or nil
+    if not statusCode then
+        return false, "Discord webhook response did not include an HTTP status."
+    end
+    if statusCode < 200 or statusCode >= 300 then
+        return false, ("Discord webhook returned HTTP %d."):format(statusCode)
+    end
+    return true, "Discord hop notification sent."
 end
 
 local function requestServerPage(url)
@@ -271,6 +352,8 @@ end
 local queueAutoHopUiReload
 local setAutoHopState
 local setPopulationHopState
+local setWebhookSettings
+local webhookStatus
 local hopSearchCancelled = false
 
 local function serverHop(minPlayers, maxPlayers, onStatus, shouldContinue)
@@ -367,6 +450,13 @@ local function serverHop(minPlayers, maxPlayers, onStatus, shouldContinue)
                 TeleportService:TeleportToPlaceInstance(SERVER_HOP_PLACE_ID, target.id, LocalPlayer)
             end)
             if ok then
+                local webhookOk, webhookMessage = sendHopWebhook(target)
+                if webhookStatus and webhookMessage then
+                    webhookStatus.Text = webhookMessage
+                end
+                if not webhookOk and webhookMessage then
+                    warn("[Forest Donations] " .. tostring(webhookMessage))
+                end
                 return true, ("Joining a server with %d players..."):format(tonumber(target.playing) or 0)
             end
             searchError = "Teleport failed: " .. tostring(teleportError)
@@ -410,6 +500,8 @@ local function buildAutoHopQueueCode(enabled, minPlayers, maxPlayers, intervalMi
     local savedState = loadAutoHopState()
     local populationEnabled = savedState and savedState.PopulationEnabled == true or false
     local populationThreshold = savedState and savedState.PopulationThreshold or 10
+    local webhookEnabled = savedState and savedState.WebhookEnabled == true or false
+    local webhookUrl = savedState and savedState.WebhookUrl or ""
     return ([[
 local env = type(getgenv) == "function" and getgenv()
     or (type(getfenv) == "function" and getfenv() or _G)
@@ -420,6 +512,8 @@ rawset(env, "__ForestDonationsAutoHop", {
     IntervalMinutes = %d,
     PopulationEnabled = %s,
     PopulationThreshold = %d,
+    WebhookEnabled = %s,
+    WebhookUrl = %q,
 })
 local ok, err = pcall(function()
     loadstring(game:HttpGet(%q))()
@@ -434,6 +528,8 @@ end
         intervalMinutes,
         tostring(populationEnabled),
         populationThreshold,
+        tostring(webhookEnabled),
+        webhookUrl,
         SCRIPT_URL
     )
 end
@@ -698,6 +794,10 @@ local hopButton = ui.hopButton
 local autoIntervalBox = ui.autoIntervalBox
 local autoHopButton = ui.autoHopButton
 local hopStatus = ui.hopStatus
+local webhookUrlBox = ui.webhookUrlBox
+local webhookSaveButton = ui.webhookSaveButton
+local webhookToggleButton = ui.webhookToggleButton
+webhookStatus = ui.webhookStatus
 local busy = false
 local claimLockKey = "__ForestDonationsClaimBusy:" .. tostring(game.JobId)
 
@@ -852,6 +952,8 @@ setAutoHopState = function(enabled, minPlayers, maxPlayers, intervalMinutes)
         IntervalMinutes = intervalMinutes,
         PopulationEnabled = previous and previous.PopulationEnabled == true or false,
         PopulationThreshold = previous and previous.PopulationThreshold or 10,
+        WebhookEnabled = previous and previous.WebhookEnabled == true or false,
+        WebhookUrl = previous and previous.WebhookUrl or "",
     })
 end
 
@@ -864,7 +966,67 @@ setPopulationHopState = function(enabled, threshold, minPlayers, maxPlayers, int
         IntervalMinutes = intervalMinutes or (previous and previous.IntervalMinutes) or 30,
         PopulationEnabled = enabled,
         PopulationThreshold = threshold,
+        WebhookEnabled = previous and previous.WebhookEnabled == true or false,
+        WebhookUrl = previous and previous.WebhookUrl or "",
     })
+end
+
+setWebhookSettings = function(enabled, webhookUrl)
+    local previous = loadAutoHopState()
+    local url = string.gsub(tostring(webhookUrl or ""), "^%s*(.-)%s*$", "%1")
+    if #url > 512 then
+        return false, "Enter a valid Discord webhook URL of 512 characters or fewer."
+    end
+    if enabled and not isValidDiscordWebhookUrl(url) then
+        return false, "Enter a valid Discord webhook URL."
+    end
+    return saveAutoHopState({
+        Enabled = previous and previous.Enabled == true or false,
+        MinPlayers = previous and previous.MinPlayers or 0,
+        MaxPlayers = previous and previous.MaxPlayers or 27,
+        IntervalMinutes = previous and previous.IntervalMinutes or 30,
+        PopulationEnabled = previous and previous.PopulationEnabled == true or false,
+        PopulationThreshold = previous and previous.PopulationThreshold or 10,
+        WebhookEnabled = enabled == true,
+        WebhookUrl = url,
+    })
+end
+
+local webhookEnabled = savedAutoHopState and savedAutoHopState.WebhookEnabled == true or false
+if webhookUrlBox and webhookSaveButton and webhookToggleButton and webhookStatus then
+    webhookSaveButton.MouseButton1Click:Connect(function()
+        local saved, saveError = setWebhookSettings(webhookEnabled, webhookUrlBox.Text)
+        if saved then
+            webhookStatus.Text = "Webhook settings saved."
+        else
+            webhookStatus.Text = "Webhook settings updated for this session only: " .. tostring(saveError)
+        end
+    end)
+
+    webhookToggleButton.MouseButton1Click:Connect(function()
+        local enable = not webhookEnabled
+        local saved, saveError = setWebhookSettings(enable, webhookUrlBox.Text)
+        if not saved and enable
+            and string.find(tostring(saveError), "valid Discord webhook URL", 1, true) then
+            webhookStatus.Text = tostring(saveError)
+            return
+        end
+
+        webhookEnabled = enable
+        webhookToggleButton.Text = webhookEnabled and "Webhook: ON" or "Webhook: OFF"
+        webhookToggleButton.BackgroundColor3 = webhookEnabled
+            and Color3.fromRGB(72, 120, 82) or Color3.fromRGB(68, 69, 74)
+        if saved then
+            webhookStatus.Text = webhookEnabled
+                and "Webhook enabled. A message will be sent when a hop starts."
+                or "Webhook disabled."
+        else
+            webhookStatus.Text = (webhookEnabled and "Webhook enabled for this session only. "
+                or "Webhook disabled for this session only. ") .. tostring(saveError)
+        end
+    end)
+else
+    warn("[Forest Donations] Webhook controls are unavailable; update forestdonos_ui.lua to enable the Webhook tab.")
 end
 
 queueAutoHopUiReload = function(enabled, minPlayers, maxPlayers, intervalMinutes)
