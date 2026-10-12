@@ -15,46 +15,6 @@ local UI_MODULE_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/r
 local AUTO_HOP_SETTINGS_FILE = "forestdonos_settings.json"
 local LocalPlayer = Players.LocalPlayer
 
-local isCommunityPlace = game.CreatorType == Enum.CreatorType.Group and game.CreatorId == COMMUNITY_ID
-local isConfiguredHopPlace = game.PlaceId == SERVER_HOP_PLACE_ID
-if not isCommunityPlace and not isConfiguredHopPlace then
-    warn("[Forest Donations] This script is restricted to community "
-        .. tostring(COMMUNITY_ID) .. " and configured hop place "
-        .. tostring(SERVER_HOP_PLACE_ID) .. ".")
-    return
-end
-
-if not LocalPlayer then
-    warn("[Forest Donations] LocalPlayer is unavailable; stopping.")
-    return
-end
-
-local notify
-local uiFetchOk, uiModuleSource = pcall(function()
-    return game:HttpGet(UI_MODULE_URL)
-end)
-if not uiFetchOk then
-    warn("[Forest Donations] Could not fetch the UI companion: " .. tostring(uiModuleSource))
-    return
-end
-local uiCompiler = loadstring
-if type(uiCompiler) ~= "function" then
-    warn("[Forest Donations] loadstring is not available to load the UI companion.")
-    return
-end
-local uiChunk, uiCompileError = uiCompiler(uiModuleSource)
-if not uiChunk then
-    warn("[Forest Donations] Could not compile the UI companion: " .. tostring(uiCompileError))
-    return
-end
-local uiModuleOk, uiModule = pcall(uiChunk)
-if not uiModuleOk or type(uiModule) ~= "table"
-    or type(uiModule.create) ~= "function" or type(uiModule.notify) ~= "function" then
-    warn("[Forest Donations] UI companion failed to initialize: " .. tostring(uiModule))
-    return
-end
-notify = uiModule.notify
-
 local function getExecutorEnv()
     if type(getgenv) == "function" then
         local ok, env = pcall(getgenv)
@@ -70,6 +30,67 @@ local function getExecutorEnv()
     end
     return _G
 end
+
+local isCommunityPlace = game.CreatorType == Enum.CreatorType.Group and game.CreatorId == COMMUNITY_ID
+local isConfiguredHopPlace = game.PlaceId == SERVER_HOP_PLACE_ID
+if not isCommunityPlace and not isConfiguredHopPlace then
+    warn("[Forest Donations] This script is restricted to community "
+        .. tostring(COMMUNITY_ID) .. " and configured hop place "
+        .. tostring(SERVER_HOP_PLACE_ID) .. ".")
+    return
+end
+
+if not LocalPlayer then
+    warn("[Forest Donations] LocalPlayer is unavailable; stopping.")
+    return
+end
+
+local activeRunKey = tostring(game.PlaceId) .. ":" .. tostring(game.JobId)
+local executorEnv = getExecutorEnv()
+local activeRuns = rawget(executorEnv, "__ForestDonationsActiveRuns")
+if type(activeRuns) ~= "table" then
+    activeRuns = {}
+    rawset(executorEnv, "__ForestDonationsActiveRuns", activeRuns)
+end
+if activeRuns[activeRunKey] then
+    warn("[Forest Donations] An instance is already running in this server; ignoring duplicate execution.")
+    return
+end
+activeRuns[activeRunKey] = true
+
+local function clearActiveRun()
+    activeRuns[activeRunKey] = nil
+end
+
+local notify
+local uiFetchOk, uiModuleSource = pcall(function()
+    return game:HttpGet(UI_MODULE_URL)
+end)
+if not uiFetchOk then
+    clearActiveRun()
+    warn("[Forest Donations] Could not fetch the UI companion: " .. tostring(uiModuleSource))
+    return
+end
+local uiCompiler = loadstring
+if type(uiCompiler) ~= "function" then
+    clearActiveRun()
+    warn("[Forest Donations] loadstring is not available to load the UI companion.")
+    return
+end
+local uiChunk, uiCompileError = uiCompiler(uiModuleSource)
+if not uiChunk then
+    clearActiveRun()
+    warn("[Forest Donations] Could not compile the UI companion: " .. tostring(uiCompileError))
+    return
+end
+local uiModuleOk, uiModule = pcall(uiChunk)
+if not uiModuleOk or type(uiModule) ~= "table"
+    or type(uiModule.create) ~= "function" or type(uiModule.notify) ~= "function" then
+    clearActiveRun()
+    warn("[Forest Donations] UI companion failed to initialize: " .. tostring(uiModule))
+    return
+end
+notify = uiModule.notify
 
 local function getExecutorFunction(name)
     local env = getExecutorEnv()
@@ -655,10 +676,12 @@ local uiCreated, ui, uiError = pcall(
     persistedAutoHopSettings
 )
 if not uiCreated then
+    clearActiveRun()
     warn("[Forest Donations] UI creation failed: " .. tostring(ui))
     return
 end
 if not ui then
+    clearActiveRun()
     warn("[Forest Donations] " .. tostring(uiError))
     return
 end
@@ -676,9 +699,12 @@ local autoIntervalBox = ui.autoIntervalBox
 local autoHopButton = ui.autoHopButton
 local hopStatus = ui.hopStatus
 local busy = false
+local claimLockKey = "__ForestDonationsClaimBusy:" .. tostring(game.JobId)
+
 local function runClaim(slot, forceClaim)
-    if busy then return end
+    if busy or rawget(getExecutorEnv(), claimLockKey) then return end
     busy = true
+    rawset(getExecutorEnv(), claimLockKey, true)
     claimButton.Active = false
     claimButton.Text = "Working..."
 
@@ -702,6 +728,7 @@ local function runClaim(slot, forceClaim)
         claimButton.Active = true
         claimButton.Text = "Claim & Teleport"
         busy = false
+        rawset(getExecutorEnv(), claimLockKey, nil)
     end)
 end
 
