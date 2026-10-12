@@ -3,12 +3,16 @@ repeat
 until game:IsLoaded()
 
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
+local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local COMMUNITY_ID = 35401545
+local SERVER_HOP_PLACE_ID = 122345940779204
+local SCRIPT_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/refs/heads/main/forestdonos"
 local LocalPlayer = Players.LocalPlayer
 
 if game.CreatorType ~= Enum.CreatorType.Group or game.CreatorId ~= COMMUNITY_ID then
@@ -29,6 +33,142 @@ local function notify(text)
             Duration = 5,
         })
     end)
+end
+
+local function getHttpRequest()
+    local synApi = rawget(getfenv(), "syn")
+    if synApi and synApi.request then return synApi.request end
+    local httpApi = rawget(getfenv(), "http")
+    if httpApi and httpApi.request then return httpApi.request end
+    local env = getfenv()
+    if env.http_request then return env.http_request end
+    if env.request then return env.request end
+    return nil
+end
+
+local function requestServerPage(url)
+    local httpRequest = getHttpRequest()
+    if httpRequest then
+        local ok, response = pcall(httpRequest, {
+            Url = url,
+            Method = "GET",
+            Headers = {["User-Agent"] = "Roblox"},
+        })
+        if not ok then
+            return nil, "The HTTP request failed: " .. tostring(response)
+        end
+        if not response then
+            return nil, "The HTTP request returned no response."
+        end
+        local statusCode = tonumber(response.StatusCode or response.Status)
+        if statusCode and (statusCode < 200 or statusCode >= 300) then
+            return nil, ("Server list request failed with HTTP %d."):format(statusCode)
+        end
+        return response.Body or response.body or response.responseBody or response.text
+    end
+
+    local ok, body = pcall(function()
+        return HttpService:GetAsync(url)
+    end)
+    if ok then
+        return body
+    end
+
+    local httpGetOk, httpGetBody = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if httpGetOk then
+        return httpGetBody
+    end
+    return nil, "Could not request the public server list: "
+        .. tostring(body) .. "; fallback failed: " .. tostring(httpGetBody)
+end
+
+local function serverHop(minPlayers, maxPlayers)
+    local cursor = nil
+    local candidates = {}
+
+    for _ = 1, 10 do
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+            :format(SERVER_HOP_PLACE_ID)
+        if cursor then
+            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+        end
+
+        local body, requestError = requestServerPage(url)
+        if not body then
+            return false, requestError or "The public server list was empty."
+        end
+        local decodedOk, page = pcall(function()
+            return HttpService:JSONDecode(body)
+        end)
+        if not decodedOk or type(page) ~= "table" or type(page.data) ~= "table" then
+            return false, "Could not parse the public server list response."
+        end
+
+        for _, server in ipairs(page.data) do
+            local playing = tonumber(server.playing)
+            if playing
+                and playing >= minPlayers
+                and playing <= maxPlayers
+                and server.id
+                and tostring(server.id) ~= tostring(game.JobId) then
+                table.insert(candidates, server)
+            end
+        end
+
+        cursor = page.nextPageCursor
+        if not cursor or #candidates > 0 then
+            break
+        end
+        task.wait(0.2)
+    end
+
+    if #candidates == 0 then
+        return false, ("No other servers found with %d-%d players."):format(minPlayers, maxPlayers)
+    end
+
+    local target = candidates[math.random(1, #candidates)]
+    local ok, teleportError = pcall(function()
+        TeleportService:TeleportToPlaceInstance(SERVER_HOP_PLACE_ID, target.id, LocalPlayer)
+    end)
+    if not ok then
+        return false, "Teleport failed: " .. tostring(teleportError)
+    end
+    return true, ("Joining a server with %d players..."):format(tonumber(target.playing) or 0)
+end
+
+local function getQueueOnTeleport()
+    local env = type(getfenv) == "function" and getfenv() or _G
+    local queue = rawget(env, "queue_on_teleport")
+    if queue then return queue end
+    local synApi = rawget(env, "syn")
+    if synApi and synApi.queue_on_teleport then return synApi.queue_on_teleport end
+    local fluxusApi = rawget(env, "fluxus")
+    if fluxusApi and fluxusApi.queue_on_teleport then return fluxusApi.queue_on_teleport end
+    return nil
+end
+
+local function buildAutoHopQueueCode(enabled, minPlayers, maxPlayers, intervalMinutes)
+    return ([[
+local env = type(getfenv) == "function" and getfenv() or _G
+rawset(env, "__ForestDonationsAutoHop", {
+    Enabled = %s,
+    MinPlayers = %d,
+    MaxPlayers = %d,
+    IntervalMinutes = %d,
+})
+local source = game:HttpGet(%q)
+local loader, loadError = loadstring(source)
+if not loader then error(loadError) end
+loader()
+]]):format(
+        tostring(enabled),
+        minPlayers,
+        maxPlayers,
+        intervalMinutes,
+        SCRIPT_URL
+    )
 end
 
 local function getStandFolder()
@@ -101,11 +241,11 @@ local function getStandOwnership(stand)
     return "unknown"
 end
 
-local function chooseStand(folder)
+local function chooseStand(folder, excludedSlot)
     local unknownStand = nil
     local ownedStand = nil
     for slot = 1, 27 do
-        local stand = getStandModel(folder, slot)
+        local stand = slot ~= excludedSlot and getStandModel(folder, slot) or nil
         if stand then
             local ownership = getStandOwnership(stand)
             if ownership == "owned" then
@@ -171,7 +311,7 @@ local function teleportToStand(stand, clearance)
     return true
 end
 
-local function claimAndGoToStand(slot, forceClaim)
+local function claimAndGoToStand(slot, forceClaim, alreadyRetried)
     slot = tonumber(slot)
     if not slot or slot % 1 ~= 0 or slot < 1 or slot > 27 then
         return false, "Choose a stand number from 1 to 27."
@@ -188,6 +328,18 @@ local function claimAndGoToStand(slot, forceClaim)
 
     local ownership = getStandOwnership(stand)
     if ownership == "claimed" then
+        if not alreadyRetried then
+            local retryStand, retrySlot = chooseStand(folder, slot)
+            if retryStand then
+                local retryOk, retryMessage, retryUsedSlot = claimAndGoToStand(retrySlot, true, true)
+                if retryOk then
+                    return true, ("Booth %02d was claimed by another player. Retried with booth %02d. %s")
+                        :format(slot, retrySlot, retryMessage), retryUsedSlot
+                end
+                return false, ("Booth %02d was claimed by another player. Retry failed: %s")
+                    :format(slot, retryMessage)
+            end
+        end
         return false, ("DonationStand_%02d appears to belong to another player."):format(slot)
     end
 
@@ -217,19 +369,37 @@ local function claimAndGoToStand(slot, forceClaim)
     end
 
     local afterClaim = getStandOwnership(stand)
+    if afterClaim == "claimed" then
+        if alreadyRetried then
+            return false, ("The retry booth, DonationStand_%02d, was also claimed by another player."):format(slot)
+        end
+        local retryStand, retrySlot = chooseStand(folder, slot)
+        if retryStand then
+            local retryOk, retryMessage, retryUsedSlot = claimAndGoToStand(retrySlot, true, true)
+            if retryOk then
+                return true, ("Booth %02d was claimed by another player. Retried with booth %02d. %s")
+                    :format(slot, retrySlot, retryMessage), retryUsedSlot
+            end
+            return false, ("Booth %02d was claimed by another player. Retry failed: %s")
+                :format(slot, retryMessage)
+        end
+        return false, ("Booth %02d was claimed by another player; no other booth is available to retry.")
+            :format(slot)
+    end
+
     local moved, moveError = teleportToStand(stand)
     if not moved then
         return false, moveError
     end
 
     if ownership == "owned" or afterClaim == "owned" then
-        return true, ("Moved to your stand (%02d)."):format(slot)
+        return true, ("Booth %02d is yours; staying there."):format(slot), slot
     elseif afterClaim == "available" then
-        return true, ("Claim requested and moved to stand %02d; ownership is not confirmed yet."):format(slot)
+        return true, ("Claim requested and moved to stand %02d; ownership is not confirmed yet."):format(slot), slot
     elseif afterClaim == "claimed" then
-        return true, ("Claim request sent and moved to stand %02d."):format(slot)
+        return true, ("Claim request sent and moved to stand %02d."):format(slot), slot
     end
-    return true, ("Claim request sent and moved to stand %02d; this stand does not expose ownership status."):format(slot)
+    return true, ("Claim request sent and moved to stand %02d; this stand does not expose ownership status."):format(slot), slot
 end
 
 local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
@@ -249,8 +419,8 @@ screenGui.Parent = playerGui
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(320, 220)
-panel.Position = UDim2.new(0.5, -160, 0.5, -110)
+panel.Size = UDim2.fromOffset(360, 320)
+panel.Position = UDim2.new(0.5, -180, 0.5, -160)
 panel.BackgroundColor3 = Color3.fromRGB(48, 48, 52)
 panel.BorderSizePixel = 0
 panel.Parent = screenGui
@@ -268,6 +438,71 @@ title.TextSize = 18
 title.Active = true
 title.Parent = panel
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
+
+local tabBar = Instance.new("Frame")
+tabBar.Name = "TabBar"
+tabBar.Size = UDim2.new(1, 0, 0, 32)
+tabBar.Position = UDim2.fromOffset(0, 42)
+tabBar.BackgroundColor3 = Color3.fromRGB(58, 59, 64)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = panel
+
+local boothTab = Instance.new("TextButton")
+boothTab.Name = "BoothTab"
+boothTab.Size = UDim2.fromOffset(76, 26)
+boothTab.Position = UDim2.fromOffset(12, 3)
+boothTab.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
+boothTab.TextColor3 = Color3.fromRGB(255, 255, 255)
+boothTab.Text = "Booth"
+boothTab.Font = Enum.Font.GothamBold
+boothTab.TextSize = 13
+boothTab.AutoButtonColor = false
+boothTab.Parent = tabBar
+Instance.new("UICorner", boothTab).CornerRadius = UDim.new(0, 6)
+
+local serverHopTab = Instance.new("TextButton")
+serverHopTab.Name = "ServerHopTab"
+serverHopTab.Size = UDim2.fromOffset(100, 26)
+serverHopTab.Position = UDim2.fromOffset(96, 3)
+serverHopTab.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+serverHopTab.TextColor3 = Color3.fromRGB(220, 220, 224)
+serverHopTab.Text = "Server Hop"
+serverHopTab.Font = Enum.Font.GothamBold
+serverHopTab.TextSize = 13
+serverHopTab.AutoButtonColor = false
+serverHopTab.Parent = tabBar
+Instance.new("UICorner", serverHopTab).CornerRadius = UDim.new(0, 6)
+
+local boothPage = Instance.new("Frame")
+boothPage.Name = "BoothPage"
+boothPage.Size = UDim2.new(1, 0, 1, -74)
+boothPage.Position = UDim2.fromOffset(0, 74)
+boothPage.BackgroundTransparency = 1
+boothPage.Parent = panel
+
+local serverHopPage = Instance.new("Frame")
+serverHopPage.Name = "ServerHopPage"
+serverHopPage.Size = UDim2.new(1, 0, 1, -74)
+serverHopPage.Position = UDim2.fromOffset(0, 74)
+serverHopPage.BackgroundTransparency = 1
+serverHopPage.Visible = false
+serverHopPage.Parent = panel
+
+local function selectTab(selectedPage, selectedButton, otherPage, otherButton)
+    selectedPage.Visible = true
+    otherPage.Visible = false
+    selectedButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
+    selectedButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    otherButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+    otherButton.TextColor3 = Color3.fromRGB(220, 220, 224)
+end
+
+boothTab.MouseButton1Click:Connect(function()
+    selectTab(boothPage, boothTab, serverHopPage, serverHopTab)
+end)
+serverHopTab.MouseButton1Click:Connect(function()
+    selectTab(serverHopPage, serverHopTab, boothPage, boothTab)
+end)
 
 local dragging = false
 local dragInput
@@ -305,19 +540,19 @@ end)
 
 local subtitle = Instance.new("TextLabel")
 subtitle.Size = UDim2.new(1, -24, 0, 24)
-subtitle.Position = UDim2.fromOffset(12, 54)
+subtitle.Position = UDim2.fromOffset(12, 8)
 subtitle.BackgroundTransparency = 1
 subtitle.Text = "Claim a Donation Stand"
 subtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
 subtitle.Font = Enum.Font.Gotham
 subtitle.TextSize = 14
 subtitle.TextXAlignment = Enum.TextXAlignment.Left
-subtitle.Parent = panel
+subtitle.Parent = boothPage
 
 local standBox = Instance.new("TextBox")
 standBox.Name = "StandNumber"
 standBox.Size = UDim2.fromOffset(76, 34)
-standBox.Position = UDim2.fromOffset(12, 88)
+standBox.Position = UDim2.fromOffset(12, 42)
 standBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
 standBox.TextColor3 = Color3.fromRGB(255, 255, 255)
 standBox.PlaceholderText = "1 - 27"
@@ -325,26 +560,26 @@ standBox.Text = ""
 standBox.ClearTextOnFocus = false
 standBox.Font = Enum.Font.Gotham
 standBox.TextSize = 14
-standBox.Parent = panel
+standBox.Parent = boothPage
 Instance.new("UICorner", standBox).CornerRadius = UDim.new(0, 6)
 
 local claimButton = Instance.new("TextButton")
 claimButton.Name = "ClaimButton"
 claimButton.Size = UDim2.fromOffset(200, 34)
-claimButton.Position = UDim2.fromOffset(100, 88)
+claimButton.Position = UDim2.fromOffset(100, 42)
 claimButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
 claimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 claimButton.Text = "Claim & Teleport"
 claimButton.Font = Enum.Font.GothamBold
 claimButton.TextSize = 14
 claimButton.AutoButtonColor = true
-claimButton.Parent = panel
+claimButton.Parent = boothPage
 Instance.new("UICorner", claimButton).CornerRadius = UDim.new(0, 6)
 
 local status = Instance.new("TextLabel")
 status.Name = "Status"
 status.Size = UDim2.new(1, -24, 0, 58)
-status.Position = UDim2.fromOffset(12, 136)
+status.Position = UDim2.fromOffset(12, 88)
 status.BackgroundTransparency = 1
 status.Text = "Searching for an available stand..."
 status.TextColor3 = Color3.fromRGB(214, 214, 218)
@@ -353,7 +588,98 @@ status.TextSize = 13
 status.TextWrapped = true
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextYAlignment = Enum.TextYAlignment.Top
-status.Parent = panel
+status.Parent = boothPage
+
+local hopSubtitle = Instance.new("TextLabel")
+hopSubtitle.Size = UDim2.new(1, -24, 0, 24)
+hopSubtitle.Position = UDim2.fromOffset(12, 8)
+hopSubtitle.BackgroundTransparency = 1
+hopSubtitle.Text = ("Find a server in place %d"):format(SERVER_HOP_PLACE_ID)
+hopSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
+hopSubtitle.Font = Enum.Font.Gotham
+hopSubtitle.TextSize = 13
+hopSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+hopSubtitle.Parent = serverHopPage
+
+local minPlayersBox = Instance.new("TextBox")
+minPlayersBox.Name = "MinimumPlayers"
+minPlayersBox.Size = UDim2.fromOffset(76, 34)
+minPlayersBox.Position = UDim2.fromOffset(12, 42)
+minPlayersBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+minPlayersBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+minPlayersBox.PlaceholderText = "Min"
+minPlayersBox.Text = ""
+minPlayersBox.ClearTextOnFocus = false
+minPlayersBox.Font = Enum.Font.Gotham
+minPlayersBox.TextSize = 14
+minPlayersBox.Parent = serverHopPage
+Instance.new("UICorner", minPlayersBox).CornerRadius = UDim.new(0, 6)
+
+local maxPlayersBox = Instance.new("TextBox")
+maxPlayersBox.Name = "MaximumPlayers"
+maxPlayersBox.Size = UDim2.fromOffset(76, 34)
+maxPlayersBox.Position = UDim2.fromOffset(96, 42)
+maxPlayersBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+maxPlayersBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+maxPlayersBox.PlaceholderText = "Max"
+maxPlayersBox.Text = ""
+maxPlayersBox.ClearTextOnFocus = false
+maxPlayersBox.Font = Enum.Font.Gotham
+maxPlayersBox.TextSize = 14
+maxPlayersBox.Parent = serverHopPage
+Instance.new("UICorner", maxPlayersBox).CornerRadius = UDim.new(0, 6)
+
+local hopButton = Instance.new("TextButton")
+hopButton.Name = "HopButton"
+hopButton.Size = UDim2.fromOffset(148, 34)
+hopButton.Position = UDim2.fromOffset(184, 42)
+hopButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
+hopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+hopButton.Text = "Find & Join"
+hopButton.Font = Enum.Font.GothamBold
+hopButton.TextSize = 14
+hopButton.Parent = serverHopPage
+Instance.new("UICorner", hopButton).CornerRadius = UDim.new(0, 6)
+
+local autoIntervalBox = Instance.new("TextBox")
+autoIntervalBox.Name = "AutoHopIntervalMinutes"
+autoIntervalBox.Size = UDim2.fromOffset(76, 34)
+autoIntervalBox.Position = UDim2.fromOffset(12, 88)
+autoIntervalBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+autoIntervalBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+autoIntervalBox.PlaceholderText = "Minutes"
+autoIntervalBox.Text = "30"
+autoIntervalBox.ClearTextOnFocus = false
+autoIntervalBox.Font = Enum.Font.Gotham
+autoIntervalBox.TextSize = 14
+autoIntervalBox.Parent = serverHopPage
+Instance.new("UICorner", autoIntervalBox).CornerRadius = UDim.new(0, 6)
+
+local autoHopButton = Instance.new("TextButton")
+autoHopButton.Name = "AutoHopButton"
+autoHopButton.Size = UDim2.fromOffset(148, 34)
+autoHopButton.Position = UDim2.fromOffset(96, 88)
+autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+autoHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+autoHopButton.Text = "Auto Hop: OFF"
+autoHopButton.Font = Enum.Font.GothamBold
+autoHopButton.TextSize = 14
+autoHopButton.Parent = serverHopPage
+Instance.new("UICorner", autoHopButton).CornerRadius = UDim.new(0, 6)
+
+local hopStatus = Instance.new("TextLabel")
+hopStatus.Name = "ServerHopStatus"
+hopStatus.Size = UDim2.new(1, -24, 0, 58)
+hopStatus.Position = UDim2.fromOffset(12, 132)
+hopStatus.BackgroundTransparency = 1
+hopStatus.Text = "Enter minimum and maximum player counts."
+hopStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
+hopStatus.Font = Enum.Font.Gotham
+hopStatus.TextSize = 13
+hopStatus.TextWrapped = true
+hopStatus.TextXAlignment = Enum.TextXAlignment.Left
+hopStatus.TextYAlignment = Enum.TextYAlignment.Top
+hopStatus.Parent = serverHopPage
 
 local busy = false
 local function runClaim(slot, forceClaim)
@@ -363,18 +689,21 @@ local function runClaim(slot, forceClaim)
     claimButton.Text = "Working..."
 
     task.spawn(function()
-        local ok, success, message = pcall(claimAndGoToStand, slot, forceClaim)
+        local ok, success, message, actualSlot = pcall(claimAndGoToStand, slot, forceClaim)
         if not ok then
             local claimError = success
             success = false
             message = "Unexpected claim error: " .. tostring(claimError)
         end
         status.Text = tostring(message)
+        notify(message)
         if success then
+            if actualSlot then
+                standBox.Text = tostring(actualSlot)
+            end
             print("[Forest Donations] " .. tostring(message))
         else
             warn("[Forest Donations] " .. tostring(message))
-            notify(message)
         end
         claimButton.Active = true
         claimButton.Text = "Claim & Teleport"
@@ -390,6 +719,202 @@ claimButton.MouseButton1Click:Connect(function()
     end
     runClaim(slot, true)
 end)
+
+local hopping = false
+hopButton.MouseButton1Click:Connect(function()
+    if hopping then
+        return
+    end
+
+    local minPlayers = tonumber(minPlayersBox.Text)
+    local maxPlayers = tonumber(maxPlayersBox.Text)
+    if not minPlayers or not maxPlayers
+        or minPlayers < 0 or maxPlayers < 0
+        or minPlayers % 1 ~= 0 or maxPlayers % 1 ~= 0
+        or minPlayers > maxPlayers then
+        hopStatus.Text = "Enter whole numbers with Min >= 0 and Max >= Min."
+        return
+    end
+
+    hopping = true
+    hopButton.Active = false
+    hopButton.Text = "Searching..."
+    hopStatus.Text = "Searching public servers..."
+    task.spawn(function()
+        local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+        if not ok then
+            local hopError = joined
+            joined = false
+            message = "Unexpected server hop error: " .. tostring(hopError)
+        end
+        hopStatus.Text = tostring(message)
+        notify(message)
+        if joined then
+            print("[Forest Donations] " .. tostring(message))
+        else
+            warn("[Forest Donations] " .. tostring(message))
+        end
+        hopButton.Active = true
+        hopButton.Text = "Find & Join"
+        hopping = false
+    end)
+end)
+
+local autoHopEnabled = false
+local autoHopGeneration = 0
+local autoHopStateEnv = type(getfenv) == "function" and getfenv() or _G
+local savedAutoHopState = rawget(autoHopStateEnv, "__ForestDonationsAutoHop")
+if type(savedAutoHopState) == "table" and savedAutoHopState.Enabled == true then
+    local savedMin = tonumber(savedAutoHopState.MinPlayers)
+    local savedMax = tonumber(savedAutoHopState.MaxPlayers)
+    local savedInterval = tonumber(savedAutoHopState.IntervalMinutes)
+    if savedMin and savedMax and savedInterval then
+        minPlayersBox.Text = tostring(savedMin)
+        maxPlayersBox.Text = tostring(savedMax)
+        autoIntervalBox.Text = tostring(savedInterval)
+        autoHopEnabled = true
+        autoHopButton.Text = "Auto Hop: ON"
+        autoHopButton.BackgroundColor3 = Color3.fromRGB(72, 120, 82)
+    end
+end
+
+local function setAutoHopState(enabled, minPlayers, maxPlayers, intervalMinutes)
+    local env = type(getfenv) == "function" and getfenv() or _G
+    local state = rawget(env, "__ForestDonationsAutoHop")
+    if type(state) ~= "table" then
+        state = {}
+        rawset(env, "__ForestDonationsAutoHop", state)
+    end
+    state.Enabled = enabled
+    state.MinPlayers = minPlayers
+    state.MaxPlayers = maxPlayers
+    state.IntervalMinutes = intervalMinutes
+end
+
+local function queueAutoHopUiReload(enabled, minPlayers, maxPlayers, intervalMinutes)
+    local queue = getQueueOnTeleport()
+    if not queue then
+        return false, "queue_on_teleport is not available."
+    end
+    local queueCode = buildAutoHopQueueCode(enabled, minPlayers, maxPlayers, intervalMinutes)
+    local ok, result = pcall(queue, queueCode)
+    if not ok or result == false then
+        return false, "Could not queue the UI reload: " .. tostring(result)
+    end
+    return true
+end
+
+local function startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
+    autoHopEnabled = true
+    autoHopGeneration = autoHopGeneration + 1
+    local generation = autoHopGeneration
+    local intervalSeconds = intervalMinutes * 60
+
+    autoHopButton.Text = "Auto Hop: ON"
+    autoHopButton.BackgroundColor3 = Color3.fromRGB(72, 120, 82)
+    hopStatus.Text = ("Auto hop enabled: every %d min, targeting %d-%d players.")
+        :format(intervalMinutes, minPlayers, maxPlayers)
+
+    task.spawn(function()
+        while autoHopEnabled and generation == autoHopGeneration do
+            for remaining = intervalSeconds, 1, -1 do
+                if not autoHopEnabled or generation ~= autoHopGeneration then
+                    return
+                end
+                if remaining % 60 == 0 then
+                    hopStatus.Text = ("Auto hop in %d min; target %d-%d players.")
+                        :format(remaining / 60, minPlayers, maxPlayers)
+                end
+                task.wait(1)
+            end
+            if autoHopEnabled and generation == autoHopGeneration then
+                while hopping and autoHopEnabled and generation == autoHopGeneration do
+                    task.wait(0.2)
+                end
+                if not autoHopEnabled or generation ~= autoHopGeneration then
+                    return
+                end
+                hopping = true
+                hopStatus.Text = "Auto-hop timer elapsed; searching for a matching server..."
+                local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+                if not ok then
+                    local hopError = joined
+                    joined = false
+                    message = "Unexpected auto-hop error: " .. tostring(hopError)
+                end
+                hopStatus.Text = tostring(message)
+                notify(message)
+                if not joined then
+                    warn("[Forest Donations] " .. tostring(message))
+                    hopping = false
+                else
+                    print("[Forest Donations] " .. tostring(message))
+                    return
+                end
+            end
+        end
+    end)
+end
+
+autoHopButton.MouseButton1Click:Connect(function()
+    if autoHopEnabled then
+        autoHopEnabled = false
+        autoHopGeneration = autoHopGeneration + 1
+        local minPlayers = tonumber(minPlayersBox.Text) or 0
+        local maxPlayers = tonumber(maxPlayersBox.Text) or minPlayers
+        local intervalMinutes = tonumber(autoIntervalBox.Text) or 30
+        setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
+        local queued, queueError = queueAutoHopUiReload(false, minPlayers, maxPlayers, intervalMinutes)
+        autoHopButton.Text = "Auto Hop: OFF"
+        autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+        hopStatus.Text = queued
+            and "Auto hop disabled; the UI will reload after your next teleport."
+            or ("Auto hop disabled locally. " .. tostring(queueError))
+        return
+    end
+
+    local minPlayers = tonumber(minPlayersBox.Text)
+    local maxPlayers = tonumber(maxPlayersBox.Text)
+    local intervalMinutes = tonumber(autoIntervalBox.Text)
+    if not minPlayers or not maxPlayers
+        or minPlayers < 0 or maxPlayers < minPlayers
+        or minPlayers % 1 ~= 0 or maxPlayers % 1 ~= 0 then
+        hopStatus.Text = "Set a valid minimum and maximum player range first."
+        return
+    end
+    if not intervalMinutes or intervalMinutes < 1
+        or intervalMinutes > 1440 or intervalMinutes % 1 ~= 0 then
+        hopStatus.Text = "Auto-hop interval must be a whole number from 1 to 1440 minutes."
+        return
+    end
+
+    local queued, queueError = queueAutoHopUiReload(true, minPlayers, maxPlayers, intervalMinutes)
+    if not queued then
+        hopStatus.Text = "Auto-hop across servers needs queue_on_teleport support. " .. tostring(queueError)
+        notify(hopStatus.Text)
+        return
+    end
+
+    setAutoHopState(true, minPlayers, maxPlayers, intervalMinutes)
+    startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
+end)
+
+if autoHopEnabled then
+    local minPlayers = tonumber(minPlayersBox.Text)
+    local maxPlayers = tonumber(maxPlayersBox.Text)
+    local intervalMinutes = tonumber(autoIntervalBox.Text)
+    local queued, queueError = queueAutoHopUiReload(true, minPlayers, maxPlayers, intervalMinutes)
+    if queued then
+        startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
+    else
+        autoHopEnabled = false
+        setAutoHopState(false, minPlayers, maxPlayers, intervalMinutes)
+        autoHopButton.Text = "Auto Hop: OFF"
+        autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+        hopStatus.Text = "Auto-hop could not resume: " .. tostring(queueError)
+        notify(hopStatus.Text)
+    end
+end
 
 task.spawn(function()
     local folder = getStandFolder()
