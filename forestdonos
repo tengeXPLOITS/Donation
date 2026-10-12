@@ -164,13 +164,17 @@ local function teleportToClaimPrompt(prompt)
 end
 
 local function activateClaimPrompt(prompt)
+    local enableDeadline = os.clock() + 1
+    while not prompt.Enabled and os.clock() < enableDeadline do
+        task.wait(0.05)
+    end
     if not prompt.Enabled then
-        return false, "The claim prompt is disabled."
+        return false, "The claim prompt remained disabled after teleporting within range."
     end
 
     local activated, activationError = pcall(function()
         prompt:InputHoldBegin()
-        task.wait(0.08)
+        task.wait(prompt.HoldDuration)
         prompt:InputHoldEnd()
     end)
     if not activated then
