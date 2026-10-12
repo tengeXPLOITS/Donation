@@ -139,7 +139,7 @@ local function getClaimPrompt(stand)
     return nil
 end
 
-local function activateClaimPrompt(prompt)
+local function teleportToClaimPrompt(prompt)
     local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
     if not root then
@@ -151,20 +151,26 @@ local function activateClaimPrompt(prompt)
         return false, "The claim prompt is not attached to ClaimAttachment."
     end
 
-    local distance = (root.Position - attachment.WorldPosition).Magnitude
-    if distance > prompt.MaxActivationDistance then
-        return false, ("Move within %d studs of DonationStand's claim prompt before claiming."):format(
-            math.ceil(prompt.MaxActivationDistance)
-        )
-    end
+    local promptCFrame = attachment.WorldCFrame
+    local offset = math.min(3, prompt.MaxActivationDistance * 0.5)
+    local targetPosition = promptCFrame.Position + promptCFrame.LookVector * offset
+    root.CFrame = CFrame.lookAt(targetPosition, promptCFrame.Position)
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+    end)
+    task.wait()
 
+    return true
+end
+
+local function activateClaimPrompt(prompt)
     if not prompt.Enabled then
         return false, "The claim prompt is disabled."
     end
 
     local activated, activationError = pcall(function()
         prompt:InputHoldBegin()
-        task.wait(prompt.HoldDuration)
+        task.wait(0.08)
         prompt:InputHoldEnd()
     end)
     if not activated then
@@ -231,6 +237,11 @@ local function claimAndGoToStand(slot)
     end
 
     if ownership ~= "owned" then
+        local movedToPrompt, promptMoveError = teleportToClaimPrompt(prompt)
+        if not movedToPrompt then
+            return false, promptMoveError
+        end
+
         local activated, activationError = activateClaimPrompt(prompt)
         if not activated then
             return false, ("Could not claim DonationStand_%02d: %s"):format(slot, activationError)
