@@ -99,7 +99,7 @@ function UI.create(serverHopPlaceId, savedSettings)
 
     local serverHopTab = Instance.new("TextButton")
     serverHopTab.Name = "ServerHopTab"
-    serverHopTab.Size = UDim2.fromOffset(100, 26)
+    serverHopTab.Size = UDim2.fromOffset(92, 26)
     serverHopTab.Position = UDim2.fromOffset(96, 3)
     serverHopTab.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
     serverHopTab.TextColor3 = Color3.fromRGB(220, 220, 224)
@@ -109,6 +109,19 @@ function UI.create(serverHopPlaceId, savedSettings)
     serverHopTab.AutoButtonColor = false
     serverHopTab.Parent = tabBar
     Instance.new("UICorner", serverHopTab).CornerRadius = UDim.new(0, 6)
+
+    local webhookTab = Instance.new("TextButton")
+    webhookTab.Name = "WebhookTab"
+    webhookTab.Size = UDim2.fromOffset(84, 26)
+    webhookTab.Position = UDim2.fromOffset(196, 3)
+    webhookTab.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+    webhookTab.TextColor3 = Color3.fromRGB(220, 220, 224)
+    webhookTab.Text = "Webhook"
+    webhookTab.Font = Enum.Font.GothamBold
+    webhookTab.TextSize = 13
+    webhookTab.AutoButtonColor = false
+    webhookTab.Parent = tabBar
+    Instance.new("UICorner", webhookTab).CornerRadius = UDim.new(0, 6)
 
     local boothPage = Instance.new("Frame")
     boothPage.Name = "BoothPage"
@@ -125,21 +138,107 @@ function UI.create(serverHopPlaceId, savedSettings)
     serverHopPage.Visible = false
     serverHopPage.Parent = panel
 
-    local function selectTab(selectedPage, selectedButton, otherPage, otherButton)
-        selectedPage.Visible = true
-        otherPage.Visible = false
-        selectedButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
-        selectedButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-        otherButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-        otherButton.TextColor3 = Color3.fromRGB(220, 220, 224)
+    local webhookPage = Instance.new("Frame")
+    webhookPage.Name = "WebhookPage"
+    webhookPage.Size = UDim2.new(1, 0, 1, -74)
+    webhookPage.Position = UDim2.fromOffset(0, 74)
+    webhookPage.BackgroundTransparency = 1
+    webhookPage.Visible = false
+    webhookPage.Parent = panel
+
+    local pages = {
+        {Page = boothPage, Button = boothTab},
+        {Page = serverHopPage, Button = serverHopTab},
+        {Page = webhookPage, Button = webhookTab},
+    }
+    local function selectTab(selectedPage)
+        for _, entry in ipairs(pages) do
+            local selected = entry.Page == selectedPage
+            entry.Page.Visible = selected
+            entry.Button.BackgroundColor3 = selected
+                and Color3.fromRGB(96, 99, 108) or Color3.fromRGB(68, 69, 74)
+            entry.Button.TextColor3 = selected
+                and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(220, 220, 224)
+        end
     end
 
     boothTab.MouseButton1Click:Connect(function()
-        selectTab(boothPage, boothTab, serverHopPage, serverHopTab)
+        selectTab(boothPage)
     end)
     serverHopTab.MouseButton1Click:Connect(function()
-        selectTab(serverHopPage, serverHopTab, boothPage, boothTab)
+        selectTab(serverHopPage)
     end)
+    webhookTab.MouseButton1Click:Connect(function()
+        selectTab(webhookPage)
+    end)
+
+    local webhookSubtitle = Instance.new("TextLabel")
+    webhookSubtitle.Size = UDim2.new(1, -24, 0, 42)
+    webhookSubtitle.Position = UDim2.fromOffset(12, 8)
+    webhookSubtitle.BackgroundTransparency = 1
+    webhookSubtitle.Text = "Send a Discord message when a server hop is initiated."
+    webhookSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
+    webhookSubtitle.Font = Enum.Font.Gotham
+    webhookSubtitle.TextSize = 13
+    webhookSubtitle.TextWrapped = true
+    webhookSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+    webhookSubtitle.TextYAlignment = Enum.TextYAlignment.Top
+    webhookSubtitle.Parent = webhookPage
+
+    local webhookUrlBox = Instance.new("TextBox")
+    webhookUrlBox.Name = "WebhookUrl"
+    webhookUrlBox.Size = UDim2.new(1, -24, 0, 38)
+    webhookUrlBox.Position = UDim2.fromOffset(12, 56)
+    webhookUrlBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
+    webhookUrlBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    webhookUrlBox.PlaceholderText = "Discord webhook URL"
+    webhookUrlBox.Text = savedSettings and savedSettings.WebhookUrl or ""
+    webhookUrlBox.ClearTextOnFocus = false
+    webhookUrlBox.Font = Enum.Font.Gotham
+    webhookUrlBox.TextSize = 12
+    webhookUrlBox.TextXAlignment = Enum.TextXAlignment.Left
+    webhookUrlBox.Parent = webhookPage
+    Instance.new("UICorner", webhookUrlBox).CornerRadius = UDim.new(0, 6)
+
+    local webhookSaveButton = Instance.new("TextButton")
+    webhookSaveButton.Name = "WebhookSaveButton"
+    webhookSaveButton.Size = UDim2.fromOffset(112, 34)
+    webhookSaveButton.Position = UDim2.fromOffset(12, 106)
+    webhookSaveButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
+    webhookSaveButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    webhookSaveButton.Text = "Save Webhook"
+    webhookSaveButton.Font = Enum.Font.GothamBold
+    webhookSaveButton.TextSize = 13
+    webhookSaveButton.Parent = webhookPage
+    Instance.new("UICorner", webhookSaveButton).CornerRadius = UDim.new(0, 6)
+
+    local webhookToggleButton = Instance.new("TextButton")
+    webhookToggleButton.Name = "WebhookToggleButton"
+    webhookToggleButton.Size = UDim2.fromOffset(148, 34)
+    webhookToggleButton.Position = UDim2.fromOffset(132, 106)
+    webhookToggleButton.BackgroundColor3 = savedSettings and savedSettings.WebhookEnabled == true
+        and Color3.fromRGB(72, 120, 82) or Color3.fromRGB(68, 69, 74)
+    webhookToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    webhookToggleButton.Text = savedSettings and savedSettings.WebhookEnabled == true
+        and "Webhook: ON" or "Webhook: OFF"
+    webhookToggleButton.Font = Enum.Font.GothamBold
+    webhookToggleButton.TextSize = 13
+    webhookToggleButton.Parent = webhookPage
+    Instance.new("UICorner", webhookToggleButton).CornerRadius = UDim.new(0, 6)
+
+    local webhookStatus = Instance.new("TextLabel")
+    webhookStatus.Name = "WebhookStatus"
+    webhookStatus.Size = UDim2.new(1, -24, 0, 78)
+    webhookStatus.Position = UDim2.fromOffset(12, 150)
+    webhookStatus.BackgroundTransparency = 1
+    webhookStatus.Text = "Webhook URL is stored in the settings file. Keep it private."
+    webhookStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
+    webhookStatus.Font = Enum.Font.Gotham
+    webhookStatus.TextSize = 12
+    webhookStatus.TextWrapped = true
+    webhookStatus.TextXAlignment = Enum.TextXAlignment.Left
+    webhookStatus.TextYAlignment = Enum.TextYAlignment.Top
+    webhookStatus.Parent = webhookPage
 
     local dragging = false
     local dragStart
@@ -389,6 +488,10 @@ function UI.create(serverHopPlaceId, savedSettings)
         autoIntervalBox = autoIntervalBox,
         autoHopButton = autoHopButton,
         hopStatus = hopStatus,
+        webhookUrlBox = webhookUrlBox,
+        webhookSaveButton = webhookSaveButton,
+        webhookToggleButton = webhookToggleButton,
+        webhookStatus = webhookStatus,
     }
 end
 
