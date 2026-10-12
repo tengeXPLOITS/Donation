@@ -1,0 +1,346 @@
+repeat
+    task.wait()
+until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local Workspace = game:GetService("Workspace")
+
+local COMMUNITY_ID = 35401545
+local LocalPlayer = Players.LocalPlayer
+
+if game.CreatorType ~= Enum.CreatorType.Group or game.CreatorId ~= COMMUNITY_ID then
+    warn("[Forest Donations] This script is restricted to games owned by community " .. tostring(COMMUNITY_ID) .. ".")
+    return
+end
+
+if not LocalPlayer then
+    warn("[Forest Donations] LocalPlayer is unavailable; stopping.")
+    return
+end
+
+local function notify(text)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Forest Donations",
+            Text = tostring(text),
+            Duration = 5,
+        })
+    end)
+end
+
+local function getStandFolder()
+    return Workspace:FindFirstChild("DonationStands") or Workspace:WaitForChild("DonationStands", 10)
+end
+
+local function getStandModel(folder, slot)
+    if not folder or slot < 1 or slot > 27 then
+        return nil
+    end
+    local name = ("DonationStand_%02d"):format(slot)
+    local stand = folder:FindFirstChild(name)
+    if stand and stand:IsA("Model") then
+        return stand
+    end
+    return nil
+end
+
+local function getStandOwnership(stand)
+    local localName = string.lower(tostring(LocalPlayer.Name))
+    local localDisplayName = string.lower(tostring(LocalPlayer.DisplayName))
+    local localUserId = tostring(LocalPlayer.UserId)
+
+    local function interpret(name, value)
+        local key = string.lower(tostring(name))
+        if key == "claimed" or key == "isclaimed" then
+            if type(value) == "boolean" then
+                return value and "claimed" or "available"
+            end
+        elseif key == "owneruserid" then
+            local ownerId = tostring(value or "")
+            if ownerId == "" or ownerId == "0" then return "available" end
+            if ownerId == localUserId then return "owned" end
+            return "claimed"
+        elseif key == "owner" or key == "occupant" then
+            if typeof(value) == "Instance" then
+                value = value.Name
+            end
+            local ownerName = string.lower(tostring(value or ""))
+            if ownerName == "" or ownerName == "unclaimed" or ownerName == "none" or ownerName == "nil" then
+                return "available"
+            end
+            if ownerName == localName or ownerName == localDisplayName or ownerName == localUserId then
+                return "owned"
+            end
+            return "claimed"
+        end
+        return nil
+    end
+
+    for attributeName, attributeValue in pairs(stand:GetAttributes()) do
+        local state = interpret(attributeName, attributeValue)
+        if state then return state end
+    end
+
+    for _, descendant in ipairs(stand:GetDescendants()) do
+        if descendant:IsA("ValueBase") then
+            local state = interpret(descendant.Name, descendant.Value)
+            if state then return state end
+        end
+    end
+
+    return "unknown"
+end
+
+local function chooseStand(folder)
+    local unknownStand = nil
+    for slot = 1, 27 do
+        local stand = getStandModel(folder, slot)
+        if stand then
+            local ownership = getStandOwnership(stand)
+            if ownership == "owned" then
+                return stand, slot, true
+            elseif ownership == "available" then
+                return stand, slot, false
+            elseif ownership == "unknown" and not unknownStand then
+                unknownStand = {stand, slot}
+            end
+        end
+    end
+
+    if unknownStand then
+        return unknownStand[1], unknownStand[2], false
+    end
+    return nil
+end
+
+local function getClaimRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("DonationBoothRemotes")
+        or ReplicatedStorage:WaitForChild("DonationBoothRemotes", 10)
+    if not remotes then return nil end
+    local remote = remotes:FindFirstChild("ClaimStand") or remotes:WaitForChild("ClaimStand", 5)
+    if remote and remote:IsA("RemoteEvent") then
+        return remote
+    end
+    return nil
+end
+
+local function teleportToStand(stand)
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
+    if not root then
+        return false, "Your character's HumanoidRootPart was not found."
+    end
+
+    local ok, boundingCFrame, boundingSize = pcall(function()
+        return stand:GetBoundingBox()
+    end)
+    if not ok then
+        return false, "Could not determine the stand's position: " .. tostring(boundingCFrame)
+    end
+
+    local forward = boundingCFrame.LookVector
+    local targetPosition = boundingCFrame.Position
+        + forward * (math.max(boundingSize.X, boundingSize.Z) * 0.5 + 4)
+        + Vector3.new(0, 2, 0)
+    root.CFrame = CFrame.lookAt(targetPosition, boundingCFrame.Position)
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+    end)
+    return true
+end
+
+local function claimAndGoToStand(slot)
+    slot = tonumber(slot)
+    if not slot or slot % 1 ~= 0 or slot < 1 or slot > 27 then
+        return false, "Choose a stand number from 1 to 27."
+    end
+
+    local folder = getStandFolder()
+    if not folder then
+        return false, "Workspace.DonationStands was not found."
+    end
+    local stand = getStandModel(folder, slot)
+    if not stand then
+        return false, ("DonationStand_%02d was not found."):format(slot)
+    end
+
+    local ownership = getStandOwnership(stand)
+    if ownership == "claimed" then
+        return false, ("DonationStand_%02d appears to belong to another player."):format(slot)
+    end
+
+    if ownership ~= "owned" then
+        local remote = getClaimRemote()
+        if not remote then
+            return false, "ReplicatedStorage.DonationBoothRemotes.ClaimStand RemoteEvent was not found."
+        end
+
+        local fired, fireError = pcall(function()
+            remote:FireServer(slot)
+        end)
+        if not fired then
+            return false, "Claim request failed: " .. tostring(fireError)
+        end
+        task.wait(0.35)
+    end
+
+    local moved, moveError = teleportToStand(stand)
+    if not moved then
+        return false, moveError
+    end
+
+    local afterClaim = getStandOwnership(stand)
+    if ownership == "owned" or afterClaim == "owned" then
+        return true, ("Moved to your stand (%02d)."):format(slot)
+    elseif afterClaim == "available" then
+        return true, ("Claim requested and moved to stand %02d; ownership is not confirmed yet."):format(slot)
+    elseif afterClaim == "claimed" then
+        return true, ("Claim request sent and moved to stand %02d."):format(slot)
+    end
+    return true, ("Claim request sent and moved to stand %02d; this stand does not expose ownership status."):format(slot)
+end
+
+local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
+if not playerGui then
+    warn("[Forest Donations] PlayerGui was not available; UI could not be created.")
+    return
+end
+
+local oldGui = playerGui:FindFirstChild("ForestDonationsUI")
+if oldGui then oldGui:Destroy() end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ForestDonationsUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.Size = UDim2.fromOffset(360, 220)
+panel.Position = UDim2.new(0.5, -180, 0.5, -110)
+panel.BackgroundColor3 = Color3.fromRGB(31, 42, 35)
+panel.BorderSizePixel = 0
+panel.Parent = screenGui
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.Size = UDim2.new(1, 0, 0, 42)
+title.BackgroundColor3 = Color3.fromRGB(66, 94, 71)
+title.BorderSizePixel = 0
+title.Text = "Forest Donations"
+title.TextColor3 = Color3.fromRGB(245, 248, 242)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+title.Parent = panel
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -28, 0, 24)
+subtitle.Position = UDim2.fromOffset(14, 54)
+subtitle.BackgroundTransparency = 1
+subtitle.Text = "Claim a Donation Stand"
+subtitle.TextColor3 = Color3.fromRGB(220, 228, 220)
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 14
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = panel
+
+local standBox = Instance.new("TextBox")
+standBox.Name = "StandNumber"
+standBox.Size = UDim2.fromOffset(100, 34)
+standBox.Position = UDim2.fromOffset(14, 88)
+standBox.BackgroundColor3 = Color3.fromRGB(48, 61, 51)
+standBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+standBox.PlaceholderText = "1 - 27"
+standBox.Text = ""
+standBox.ClearTextOnFocus = false
+standBox.Font = Enum.Font.Gotham
+standBox.TextSize = 14
+standBox.Parent = panel
+Instance.new("UICorner", standBox).CornerRadius = UDim.new(0, 6)
+
+local claimButton = Instance.new("TextButton")
+claimButton.Name = "ClaimButton"
+claimButton.Size = UDim2.fromOffset(210, 34)
+claimButton.Position = UDim2.fromOffset(128, 88)
+claimButton.BackgroundColor3 = Color3.fromRGB(86, 139, 91)
+claimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+claimButton.Text = "Claim & Teleport"
+claimButton.Font = Enum.Font.GothamBold
+claimButton.TextSize = 14
+claimButton.AutoButtonColor = true
+claimButton.Parent = panel
+Instance.new("UICorner", claimButton).CornerRadius = UDim.new(0, 6)
+
+local status = Instance.new("TextLabel")
+status.Name = "Status"
+status.Size = UDim2.new(1, -28, 0, 58)
+status.Position = UDim2.fromOffset(14, 136)
+status.BackgroundTransparency = 1
+status.Text = "Searching for an available stand..."
+status.TextColor3 = Color3.fromRGB(204, 216, 205)
+status.Font = Enum.Font.Gotham
+status.TextSize = 13
+status.TextWrapped = true
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextYAlignment = Enum.TextYAlignment.Top
+status.Parent = panel
+
+local busy = false
+local function runClaim(slot)
+    if busy then return end
+    busy = true
+    claimButton.Active = false
+    claimButton.Text = "Working..."
+
+    task.spawn(function()
+        local ok, success, message = pcall(claimAndGoToStand, slot)
+        if not ok then
+            success = false
+            message = "Unexpected claim error: " .. tostring(success)
+        end
+        status.Text = tostring(message)
+        if success then
+            print("[Forest Donations] " .. tostring(message))
+        else
+            warn("[Forest Donations] " .. tostring(message))
+            notify(message)
+        end
+        claimButton.Active = true
+        claimButton.Text = "Claim & Teleport"
+        busy = false
+    end)
+end
+
+claimButton.MouseButton1Click:Connect(function()
+    local slot = tonumber(standBox.Text)
+    if not slot then
+        status.Text = "Enter a stand number from 1 to 27."
+        return
+    end
+    runClaim(slot)
+end)
+
+task.spawn(function()
+    local folder = getStandFolder()
+    if not folder then
+        status.Text = "Workspace.DonationStands was not found."
+        warn("[Forest Donations] Workspace.DonationStands was not found.")
+        return
+    end
+
+    local stand, slot = chooseStand(folder)
+    if not stand then
+        status.Text = "No DonationStand_01 through DonationStand_27 models were found."
+        warn("[Forest Donations] No valid donation stand models were found.")
+        return
+    end
+
+    standBox.Text = tostring(slot)
+    status.Text = ("Found DonationStand_%02d. Claiming and moving there..."):format(slot)
+    runClaim(slot)
+end)
