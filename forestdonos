@@ -103,12 +103,15 @@ end
 
 local function chooseStand(folder)
     local unknownStand = nil
+    local ownedStand = nil
     for slot = 1, 27 do
         local stand = getStandModel(folder, slot)
         if stand then
             local ownership = getStandOwnership(stand)
             if ownership == "owned" then
-                return stand, slot, true
+                if not ownedStand then
+                    ownedStand = {stand, slot}
+                end
             elseif ownership == "available" then
                 return stand, slot, false
             elseif ownership == "unknown" and not unknownStand then
@@ -119,6 +122,9 @@ local function chooseStand(folder)
 
     if unknownStand then
         return unknownStand[1], unknownStand[2], false
+    end
+    if ownedStand then
+        return ownedStand[1], ownedStand[2], true
     end
     return nil
 end
@@ -163,7 +169,7 @@ local function teleportToStand(stand)
     return true
 end
 
-local function claimAndGoToStand(slot)
+local function claimAndGoToStand(slot, forceClaim)
     slot = tonumber(slot)
     if not slot or slot % 1 ~= 0 or slot < 1 or slot > 27 then
         return false, "Choose a stand number from 1 to 27."
@@ -183,7 +189,7 @@ local function claimAndGoToStand(slot)
         return false, ("DonationStand_%02d appears to belong to another player."):format(slot)
     end
 
-    if ownership ~= "owned" then
+    if forceClaim or ownership ~= "owned" then
         local remote = getClaimRemote()
         if not remote then
             return false, "ReplicatedStorage.DonationBoothRemotes.ClaimStand RemoteEvent was not found."
@@ -342,17 +348,18 @@ status.TextYAlignment = Enum.TextYAlignment.Top
 status.Parent = panel
 
 local busy = false
-local function runClaim(slot)
+local function runClaim(slot, forceClaim)
     if busy then return end
     busy = true
     claimButton.Active = false
     claimButton.Text = "Working..."
 
     task.spawn(function()
-        local ok, success, message = pcall(claimAndGoToStand, slot)
+        local ok, success, message = pcall(claimAndGoToStand, slot, forceClaim)
         if not ok then
+            local claimError = success
             success = false
-            message = "Unexpected claim error: " .. tostring(success)
+            message = "Unexpected claim error: " .. tostring(claimError)
         end
         status.Text = tostring(message)
         if success then
@@ -393,5 +400,5 @@ task.spawn(function()
 
     standBox.Text = tostring(slot)
     status.Text = ("Found DonationStand_%02d. Claiming and moving there..."):format(slot)
-    runClaim(slot)
+    runClaim(slot, true)
 end)
