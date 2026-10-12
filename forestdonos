@@ -5,6 +5,7 @@ until game:IsLoaded()
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local COMMUNITY_ID = 35401545
@@ -51,43 +52,50 @@ local function getStandOwnership(stand)
     local localDisplayName = string.lower(tostring(LocalPlayer.DisplayName))
     local localUserId = tostring(LocalPlayer.UserId)
 
-    local function interpret(name, value)
-        local key = string.lower(tostring(name))
-        if key == "claimed" or key == "isclaimed" then
-            if type(value) == "boolean" then
-                return value and "claimed" or "available"
+    local function findOwnershipValue(fieldName)
+        for attributeName, value in pairs(stand:GetAttributes()) do
+            if string.lower(tostring(attributeName)) == fieldName then
+                return value, true
             end
-        elseif key == "owneruserid" then
-            local ownerId = tostring(value or "")
-            if ownerId == "" or ownerId == "0" then return "available" end
-            if ownerId == localUserId then return "owned" end
-            return "claimed"
-        elseif key == "owner" or key == "occupant" then
-            if typeof(value) == "Instance" then
-                value = value.Name
-            end
-            local ownerName = string.lower(tostring(value or ""))
-            if ownerName == "" or ownerName == "unclaimed" or ownerName == "none" or ownerName == "nil" then
-                return "available"
-            end
-            if ownerName == localName or ownerName == localDisplayName or ownerName == localUserId then
-                return "owned"
-            end
-            return "claimed"
         end
-        return nil
+
+        for _, descendant in ipairs(stand:GetDescendants()) do
+            if descendant:IsA("ValueBase") and string.lower(descendant.Name) == fieldName then
+                return descendant.Value, true
+            end
+        end
+        return nil, false
     end
 
-    for attributeName, attributeValue in pairs(stand:GetAttributes()) do
-        local state = interpret(attributeName, attributeValue)
-        if state then return state end
+    local ownerUserId, hasOwnerUserId = findOwnershipValue("owneruserid")
+    if hasOwnerUserId then
+        local id = tostring(ownerUserId or "")
+        if id == "" or id == "0" then return "available" end
+        if id == localUserId then return "owned" end
+        return "claimed"
     end
 
-    for _, descendant in ipairs(stand:GetDescendants()) do
-        if descendant:IsA("ValueBase") then
-            local state = interpret(descendant.Name, descendant.Value)
-            if state then return state end
+    local ownerName, hasOwnerName = findOwnershipValue("ownername")
+    if hasOwnerName then
+        if typeof(ownerName) == "Instance" then
+            ownerName = ownerName.Name
         end
+        local name = string.lower(tostring(ownerName or ""))
+        if name == "" or name == "unclaimed" or name == "none" or name == "nil" then
+            return "available"
+        end
+        if name == localName or name == localDisplayName or name == localUserId then
+            return "owned"
+        end
+        return "claimed"
+    end
+
+    local claimed, hasClaimed = findOwnershipValue("claimed")
+    if not hasClaimed then
+        claimed, hasClaimed = findOwnershipValue("isclaimed")
+    end
+    if hasClaimed and type(claimed) == "boolean" then
+        return claimed and "claimed" or "available"
     end
 
     return "unknown"
@@ -144,7 +152,11 @@ local function teleportToStand(stand)
     local targetPosition = boundingCFrame.Position
         + forward * (math.max(boundingSize.X, boundingSize.Z) * 0.5 + 4)
         + Vector3.new(0, 2, 0)
-    root.CFrame = CFrame.lookAt(targetPosition, boundingCFrame.Position)
+    local awayDirection = targetPosition - boundingCFrame.Position
+    if awayDirection.Magnitude <= 1e-6 then
+        awayDirection = forward
+    end
+    root.CFrame = CFrame.lookAt(targetPosition, targetPosition + awayDirection.Unit)
     pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
     end)
@@ -183,7 +195,11 @@ local function claimAndGoToStand(slot)
         if not fired then
             return false, "Claim request failed: " .. tostring(fireError)
         end
-        task.wait(0.35)
+        local deadline = os.clock() + 0.3
+        repeat
+            task.wait(0.05)
+            ownership = getStandOwnership(stand)
+        until ownership == "owned" or ownership == "claimed" or os.clock() >= deadline
     end
 
     local moved, moveError = teleportToStand(stand)
@@ -219,9 +235,9 @@ screenGui.Parent = playerGui
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(360, 220)
-panel.Position = UDim2.new(0.5, -180, 0.5, -110)
-panel.BackgroundColor3 = Color3.fromRGB(31, 42, 35)
+panel.Size = UDim2.fromOffset(320, 220)
+panel.Position = UDim2.new(0.5, -160, 0.5, -110)
+panel.BackgroundColor3 = Color3.fromRGB(48, 48, 52)
 panel.BorderSizePixel = 0
 panel.Parent = screenGui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
@@ -229,21 +245,56 @@ Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local title = Instance.new("TextLabel")
 title.Name = "Title"
 title.Size = UDim2.new(1, 0, 0, 42)
-title.BackgroundColor3 = Color3.fromRGB(66, 94, 71)
+title.BackgroundColor3 = Color3.fromRGB(76, 78, 84)
 title.BorderSizePixel = 0
 title.Text = "Forest Donations"
-title.TextColor3 = Color3.fromRGB(245, 248, 242)
+title.TextColor3 = Color3.fromRGB(245, 245, 248)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 18
+title.Active = true
 title.Parent = panel
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
 
+local dragging = false
+local dragInput
+local dragStart
+local panelStart
+
+title.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        panelStart = panel.Position
+        dragInput = input
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        panel.Position = UDim2.new(
+            panelStart.X.Scale,
+            panelStart.X.Offset + delta.X,
+            panelStart.Y.Scale,
+            panelStart.Y.Offset + delta.Y
+        )
+    end
+end)
+
 local subtitle = Instance.new("TextLabel")
-subtitle.Size = UDim2.new(1, -28, 0, 24)
-subtitle.Position = UDim2.fromOffset(14, 54)
+subtitle.Size = UDim2.new(1, -24, 0, 24)
+subtitle.Position = UDim2.fromOffset(12, 54)
 subtitle.BackgroundTransparency = 1
 subtitle.Text = "Claim a Donation Stand"
-subtitle.TextColor3 = Color3.fromRGB(220, 228, 220)
+subtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
 subtitle.Font = Enum.Font.Gotham
 subtitle.TextSize = 14
 subtitle.TextXAlignment = Enum.TextXAlignment.Left
@@ -251,9 +302,9 @@ subtitle.Parent = panel
 
 local standBox = Instance.new("TextBox")
 standBox.Name = "StandNumber"
-standBox.Size = UDim2.fromOffset(100, 34)
-standBox.Position = UDim2.fromOffset(14, 88)
-standBox.BackgroundColor3 = Color3.fromRGB(48, 61, 51)
+standBox.Size = UDim2.fromOffset(76, 34)
+standBox.Position = UDim2.fromOffset(12, 88)
+standBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
 standBox.TextColor3 = Color3.fromRGB(255, 255, 255)
 standBox.PlaceholderText = "1 - 27"
 standBox.Text = ""
@@ -265,9 +316,9 @@ Instance.new("UICorner", standBox).CornerRadius = UDim.new(0, 6)
 
 local claimButton = Instance.new("TextButton")
 claimButton.Name = "ClaimButton"
-claimButton.Size = UDim2.fromOffset(210, 34)
-claimButton.Position = UDim2.fromOffset(128, 88)
-claimButton.BackgroundColor3 = Color3.fromRGB(86, 139, 91)
+claimButton.Size = UDim2.fromOffset(200, 34)
+claimButton.Position = UDim2.fromOffset(100, 88)
+claimButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
 claimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 claimButton.Text = "Claim & Teleport"
 claimButton.Font = Enum.Font.GothamBold
@@ -278,11 +329,11 @@ Instance.new("UICorner", claimButton).CornerRadius = UDim.new(0, 6)
 
 local status = Instance.new("TextLabel")
 status.Name = "Status"
-status.Size = UDim2.new(1, -28, 0, 58)
-status.Position = UDim2.fromOffset(14, 136)
+status.Size = UDim2.new(1, -24, 0, 58)
+status.Position = UDim2.fromOffset(12, 136)
 status.BackgroundTransparency = 1
 status.Text = "Searching for an available stand..."
-status.TextColor3 = Color3.fromRGB(204, 216, 205)
+status.TextColor3 = Color3.fromRGB(214, 214, 218)
 status.Font = Enum.Font.Gotham
 status.TextSize = 13
 status.TextWrapped = true
