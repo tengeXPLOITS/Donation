@@ -380,7 +380,7 @@ claimButton.MouseButton1Click:Connect(function()
         status.Text = "Enter a stand number from 1 to 27."
         return
     end
-    runClaim(slot)
+    runClaim(slot, true)
 end)
 
 task.spawn(function()
