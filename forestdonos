@@ -3,6 +3,7 @@ repeat
 until game:IsLoaded()
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -128,65 +129,20 @@ local function chooseStand(folder)
     return nil
 end
 
-local function getClaimPrompt(stand)
-    local boothKit = stand:FindFirstChild("BoothKit")
-    local itemsPart = boothKit and boothKit:FindFirstChild("ItemsPart")
-    local attachment = itemsPart and itemsPart:FindFirstChild("ClaimAttachment")
-    local prompt = attachment and attachment:FindFirstChild("ClaimPrompt")
-    if prompt and prompt:IsA("ProximityPrompt") then
-        return prompt
+local function getClaimRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("DonationBoothRemotes")
+        or ReplicatedStorage:WaitForChild("DonationBoothRemotes", 10)
+    if not remotes then
+        return nil
+    end
+    local remote = remotes:FindFirstChild("ClaimStand") or remotes:WaitForChild("ClaimStand", 5)
+    if remote and remote:IsA("RemoteEvent") then
+        return remote
     end
     return nil
 end
 
-local function teleportToClaimPrompt(prompt)
-    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
-    if not root then
-        return false, "Your character's HumanoidRootPart was not found."
-    end
-
-    local attachment = prompt.Parent
-    if not attachment or not attachment:IsA("Attachment") then
-        return false, "The claim prompt is not attached to ClaimAttachment."
-    end
-
-    local promptCFrame = attachment.WorldCFrame
-    local offset = math.min(3, prompt.MaxActivationDistance * 0.5)
-    local targetPosition = promptCFrame.Position + promptCFrame.LookVector * offset
-    root.CFrame = CFrame.lookAt(targetPosition, promptCFrame.Position)
-    pcall(function()
-        root.AssemblyLinearVelocity = Vector3.zero
-    end)
-    task.wait()
-
-    return true
-end
-
-local function activateClaimPrompt(prompt)
-    local enableDeadline = os.clock() + 1
-    while not prompt.Enabled and os.clock() < enableDeadline do
-        task.wait(0.05)
-    end
-    if not prompt.Enabled then
-        return false, "The claim prompt remained disabled after teleporting within range."
-    end
-
-    local activated, activationError = pcall(function()
-        prompt:InputHoldBegin()
-        task.wait(prompt.HoldDuration)
-        prompt:InputHoldEnd()
-    end)
-    if not activated then
-        pcall(function()
-            prompt:InputHoldEnd()
-        end)
-        return false, "Could not activate the claim prompt: " .. tostring(activationError)
-    end
-    return true
-end
-
-local function teleportToStand(stand)
+local function teleportToStand(stand, clearance)
     local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
     if not root then
@@ -202,7 +158,7 @@ local function teleportToStand(stand)
 
     local forward = boundingCFrame.LookVector
     local targetPosition = boundingCFrame.Position
-        + forward * (math.max(boundingSize.X, boundingSize.Z) * 0.5 + 4)
+        + forward * (math.max(boundingSize.X, boundingSize.Z) * 0.5 + (clearance or 4))
         + Vector3.new(0, 2, 0)
     local awayDirection = targetPosition - boundingCFrame.Position
     if awayDirection.Magnitude <= 1e-6 then
@@ -215,7 +171,7 @@ local function teleportToStand(stand)
     return true
 end
 
-local function claimAndGoToStand(slot)
+local function claimAndGoToStand(slot, forceClaim)
     slot = tonumber(slot)
     if not slot or slot % 1 ~= 0 or slot < 1 or slot > 27 then
         return false, "Choose a stand number from 1 to 27."
@@ -235,22 +191,24 @@ local function claimAndGoToStand(slot)
         return false, ("DonationStand_%02d appears to belong to another player."):format(slot)
     end
 
-    local prompt = getClaimPrompt(stand)
-    if not prompt then
-        return false, ("DonationStand_%02d is missing BoothKit.ItemsPart.ClaimAttachment.ClaimPrompt."):format(slot)
-    end
+    if forceClaim or ownership ~= "owned" then
+        local positioned, positionError = teleportToStand(stand, 6)
+        if not positioned then
+            return false, positionError
+        end
+        task.wait()
 
-    if ownership ~= "owned" then
-        local movedToPrompt, promptMoveError = teleportToClaimPrompt(prompt)
-        if not movedToPrompt then
-            return false, promptMoveError
+        local remote = getClaimRemote()
+        if not remote then
+            return false, "ReplicatedStorage.DonationBoothRemotes.ClaimStand RemoteEvent was not found."
         end
 
-        local activated, activationError = activateClaimPrompt(prompt)
-        if not activated then
-            return false, ("Could not claim DonationStand_%02d: %s"):format(slot, activationError)
+        local fired, fireError = pcall(function()
+            remote:FireServer(slot)
+        end)
+        if not fired then
+            return false, "Claim request failed: " .. tostring(fireError)
         end
-
         local deadline = os.clock() + 0.3
         repeat
             task.wait(0.05)
@@ -267,11 +225,11 @@ local function claimAndGoToStand(slot)
     if ownership == "owned" or afterClaim == "owned" then
         return true, ("Moved to your stand (%02d)."):format(slot)
     elseif afterClaim == "available" then
-        return true, ("Claim prompt activated and moved to stand %02d; ownership is not confirmed yet."):format(slot)
+        return true, ("Claim requested and moved to stand %02d; ownership is not confirmed yet."):format(slot)
     elseif afterClaim == "claimed" then
-        return true, ("Claim prompt activated and moved to stand %02d."):format(slot)
+        return true, ("Claim request sent and moved to stand %02d."):format(slot)
     end
-    return true, ("Claim prompt activated and moved to stand %02d; this stand does not expose ownership status."):format(slot)
+    return true, ("Claim request sent and moved to stand %02d; this stand does not expose ownership status."):format(slot)
 end
 
 local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
@@ -398,14 +356,14 @@ status.TextYAlignment = Enum.TextYAlignment.Top
 status.Parent = panel
 
 local busy = false
-local function runClaim(slot)
+local function runClaim(slot, forceClaim)
     if busy then return end
     busy = true
     claimButton.Active = false
     claimButton.Text = "Working..."
 
     task.spawn(function()
-        local ok, success, message = pcall(claimAndGoToStand, slot)
+        local ok, success, message = pcall(claimAndGoToStand, slot, forceClaim)
         if not ok then
             local claimError = success
             success = false
@@ -430,7 +388,7 @@ claimButton.MouseButton1Click:Connect(function()
         status.Text = "Enter a stand number from 1 to 27."
         return
     end
-    runClaim(slot)
+    runClaim(slot, true)
 end)
 
 task.spawn(function()
@@ -450,5 +408,5 @@ task.spawn(function()
 
     standBox.Text = tostring(slot)
     status.Text = ("Found DonationStand_%02d. Claiming and moving there..."):format(slot)
-    runClaim(slot)
+    runClaim(slot, true)
 end)
