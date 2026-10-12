@@ -5,13 +5,34 @@ local UserInputService = game:GetService("UserInputService")
 local UI = {}
 
 function UI.notify(text)
+    local notificationText = tostring(text)
+    local now = os.clock()
+    local env = _G
+    if type(getgenv) == "function" then
+        local ok, executorEnv = pcall(getgenv)
+        if ok and type(executorEnv) == "table" then
+            env = executorEnv
+        end
+    end
+    local lastNotification = rawget(env, "__ForestDonationsLastNotification")
+    if type(lastNotification) == "table"
+        and notificationText == lastNotification.Text
+        and now - (tonumber(lastNotification.At) or 0) < 1.5 then
+        return false
+    end
+    rawset(env, "__ForestDonationsLastNotification", {
+        Text = notificationText,
+        At = now,
+    })
+
     pcall(function()
         StarterGui:SetCore("SendNotification", {
             Title = "Forest Donations",
-            Text = tostring(text),
+            Text = notificationText,
             Duration = 5,
         })
     end)
+    return true
 end
 
 function UI.create(serverHopPlaceId, savedSettings)
@@ -201,22 +222,31 @@ function UI.create(serverHopPlaceId, savedSettings)
     status.TextYAlignment = Enum.TextYAlignment.Top
     status.Parent = boothPage
 
+    local populationSection = Instance.new("Frame")
+    populationSection.Name = "PopulationHopperSection"
+    populationSection.Size = UDim2.new(1, -24, 0, 124)
+    populationSection.Position = UDim2.fromOffset(12, 188)
+    populationSection.BackgroundColor3 = Color3.fromRGB(58, 59, 64)
+    populationSection.BorderSizePixel = 0
+    populationSection.Parent = serverHopPage
+    Instance.new("UICorner", populationSection).CornerRadius = UDim.new(0, 8)
+
     local populationSubtitle = Instance.new("TextLabel")
     populationSubtitle.Name = "PopulationHopSubtitle"
-    populationSubtitle.Size = UDim2.new(1, -24, 0, 22)
-    populationSubtitle.Position = UDim2.fromOffset(12, 194)
+    populationSubtitle.Size = UDim2.new(1, -16, 0, 22)
+    populationSubtitle.Position = UDim2.fromOffset(8, 6)
     populationSubtitle.BackgroundTransparency = 1
     populationSubtitle.Text = "Population hopper"
     populationSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
     populationSubtitle.Font = Enum.Font.GothamBold
     populationSubtitle.TextSize = 14
     populationSubtitle.TextXAlignment = Enum.TextXAlignment.Left
-    populationSubtitle.Parent = serverHopPage
+    populationSubtitle.Parent = populationSection
 
     local populationThresholdBox = Instance.new("TextBox")
     populationThresholdBox.Name = "PopulationThreshold"
     populationThresholdBox.Size = UDim2.fromOffset(76, 34)
-    populationThresholdBox.Position = UDim2.fromOffset(12, 220)
+    populationThresholdBox.Position = UDim2.fromOffset(8, 34)
     populationThresholdBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
     populationThresholdBox.TextColor3 = Color3.fromRGB(255, 255, 255)
     populationThresholdBox.PlaceholderText = "Below #"
@@ -225,25 +255,25 @@ function UI.create(serverHopPlaceId, savedSettings)
     populationThresholdBox.ClearTextOnFocus = false
     populationThresholdBox.Font = Enum.Font.Gotham
     populationThresholdBox.TextSize = 14
-    populationThresholdBox.Parent = serverHopPage
+    populationThresholdBox.Parent = populationSection
     Instance.new("UICorner", populationThresholdBox).CornerRadius = UDim.new(0, 6)
 
     local populationHopButton = Instance.new("TextButton")
     populationHopButton.Name = "PopulationHopButton"
     populationHopButton.Size = UDim2.fromOffset(196, 34)
-    populationHopButton.Position = UDim2.fromOffset(96, 220)
+    populationHopButton.Position = UDim2.fromOffset(92, 34)
     populationHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
     populationHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
     populationHopButton.Text = "Population Hop: OFF"
     populationHopButton.Font = Enum.Font.GothamBold
     populationHopButton.TextSize = 13
-    populationHopButton.Parent = serverHopPage
+    populationHopButton.Parent = populationSection
     Instance.new("UICorner", populationHopButton).CornerRadius = UDim.new(0, 6)
 
     local populationHopStatus = Instance.new("TextLabel")
     populationHopStatus.Name = "PopulationHopStatus"
-    populationHopStatus.Size = UDim2.new(1, -24, 0, 46)
-    populationHopStatus.Position = UDim2.fromOffset(12, 260)
+    populationHopStatus.Size = UDim2.new(1, -16, 0, 42)
+    populationHopStatus.Position = UDim2.fromOffset(8, 74)
     populationHopStatus.BackgroundTransparency = 1
     populationHopStatus.Text = "Hops when this server drops below the threshold; destination uses Server Hop Min/Max."
     populationHopStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
@@ -252,7 +282,7 @@ function UI.create(serverHopPlaceId, savedSettings)
     populationHopStatus.TextWrapped = true
     populationHopStatus.TextXAlignment = Enum.TextXAlignment.Left
     populationHopStatus.TextYAlignment = Enum.TextYAlignment.Top
-    populationHopStatus.Parent = serverHopPage
+    populationHopStatus.Parent = populationSection
 
     local hopSubtitle = Instance.new("TextLabel")
     hopSubtitle.Size = UDim2.new(1, -24, 0, 24)
