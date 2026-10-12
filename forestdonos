@@ -139,7 +139,7 @@ local function getClaimPrompt(stand)
     return nil
 end
 
-local function teleportToClaimPrompt(prompt)
+local function activateClaimPrompt(prompt)
     local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
     if not root then
@@ -151,9 +151,54 @@ local function teleportToClaimPrompt(prompt)
         return false, "The claim prompt is not attached to ClaimAttachment."
     end
 
-    local promptCFrame = attachment.WorldCFrame
-    local targetPosition = promptCFrame.Position + promptCFrame.LookVector * 3
-    root.CFrame = CFrame.lookAt(targetPosition, promptCFrame.Position)
+    local distance = (root.Position - attachment.WorldPosition).Magnitude
+    if distance > prompt.MaxActivationDistance then
+        return false, ("Move within %d studs of DonationStand's claim prompt before claiming."):format(
+            math.ceil(prompt.MaxActivationDistance)
+        )
+    end
+
+    if not prompt.Enabled then
+        return false, "The claim prompt is disabled."
+    end
+
+    local activated, activationError = pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(prompt.HoldDuration)
+        prompt:InputHoldEnd()
+    end)
+    if not activated then
+        pcall(function()
+            prompt:InputHoldEnd()
+        end)
+        return false, "Could not activate the claim prompt: " .. tostring(activationError)
+    end
+    return true
+end
+
+local function teleportToStand(stand)
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
+    if not root then
+        return false, "Your character's HumanoidRootPart was not found."
+    end
+
+    local ok, boundingCFrame, boundingSize = pcall(function()
+        return stand:GetBoundingBox()
+    end)
+    if not ok then
+        return false, "Could not determine the stand's position: " .. tostring(boundingCFrame)
+    end
+
+    local forward = boundingCFrame.LookVector
+    local targetPosition = boundingCFrame.Position
+        + forward * (math.max(boundingSize.X, boundingSize.Z) * 0.5 + 4)
+        + Vector3.new(0, 2, 0)
+    local awayDirection = targetPosition - boundingCFrame.Position
+    if awayDirection.Magnitude <= 1e-6 then
+        awayDirection = forward
+    end
+    root.CFrame = CFrame.lookAt(targetPosition, targetPosition + awayDirection.Unit)
     pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
     end)
@@ -185,25 +230,10 @@ local function claimAndGoToStand(slot)
         return false, ("DonationStand_%02d is missing BoothKit.ItemsPart.ClaimAttachment.ClaimPrompt."):format(slot)
     end
 
-    local moved, moveError = teleportToClaimPrompt(prompt)
-    if not moved then
-        return false, moveError
-    end
-
     if ownership ~= "owned" then
-        if not prompt.Enabled then
-            return false, ("The claim prompt for DonationStand_%02d is disabled."):format(slot)
-        end
-        local activated, activationError = pcall(function()
-            prompt:InputHoldBegin()
-            task.wait(prompt.HoldDuration)
-            prompt:InputHoldEnd()
-        end)
+        local activated, activationError = activateClaimPrompt(prompt)
         if not activated then
-            pcall(function()
-                prompt:InputHoldEnd()
-            end)
-            return false, "Could not activate the claim prompt: " .. tostring(activationError)
+            return false, ("Could not claim DonationStand_%02d: %s"):format(slot, activationError)
         end
 
         local deadline = os.clock() + 0.3
@@ -214,6 +244,11 @@ local function claimAndGoToStand(slot)
     end
 
     local afterClaim = getStandOwnership(stand)
+    local moved, moveError = teleportToStand(stand)
+    if not moved then
+        return false, moveError
+    end
+
     if ownership == "owned" or afterClaim == "owned" then
         return true, ("Moved to your stand (%02d)."):format(slot)
     elseif afterClaim == "available" then
