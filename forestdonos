@@ -15,8 +15,12 @@ local SERVER_HOP_PLACE_ID = 122345940779204
 local SCRIPT_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/refs/heads/main/forestdonos"
 local LocalPlayer = Players.LocalPlayer
 
-if game.CreatorType ~= Enum.CreatorType.Group or game.CreatorId ~= COMMUNITY_ID then
-    warn("[Forest Donations] This script is restricted to games owned by community " .. tostring(COMMUNITY_ID) .. ".")
+local isCommunityPlace = game.CreatorType == Enum.CreatorType.Group and game.CreatorId == COMMUNITY_ID
+local isConfiguredHopPlace = game.PlaceId == SERVER_HOP_PLACE_ID
+if not isCommunityPlace and not isConfiguredHopPlace then
+    warn("[Forest Donations] This script is restricted to community "
+        .. tostring(COMMUNITY_ID) .. " and configured hop place "
+        .. tostring(SERVER_HOP_PLACE_ID) .. ".")
     return
 end
 
@@ -158,10 +162,26 @@ rawset(env, "__ForestDonationsAutoHop", {
     MaxPlayers = %d,
     IntervalMinutes = %d,
 })
-local source = game:HttpGet(%q)
-local loader, loadError = loadstring(source)
-if not loader then error(loadError) end
-loader()
+local fetchOk, source = pcall(function()
+    return game:HttpGet(%q)
+end)
+if not fetchOk then
+    warn("[Forest Donations] Could not fetch the UI after teleport: " .. tostring(source))
+    return
+end
+local compileOk, loader, loadError = pcall(loadstring, source)
+if not compileOk then
+    warn("[Forest Donations] Could not compile the UI after teleport: " .. tostring(loader))
+    return
+end
+if not loader then
+    warn("[Forest Donations] Could not compile the UI after teleport: " .. tostring(loadError))
+    return
+end
+local runOk, runError = pcall(loader)
+if not runOk then
+    warn("[Forest Donations] UI failed after teleport: " .. tostring(runError))
+end
 ]]):format(
         tostring(enabled),
         minPlayers,
