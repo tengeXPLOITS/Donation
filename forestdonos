@@ -5,14 +5,13 @@ until game:IsLoaded()
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterGui = game:GetService("StarterGui")
 local TeleportService = game:GetService("TeleportService")
-local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local COMMUNITY_ID = 35401545
 local SERVER_HOP_PLACE_ID = 122345940779204
 local SCRIPT_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/refs/heads/main/forestdonos"
+local UI_MODULE_URL = "https://raw.githubusercontent.com/tengeXPLOITS/Donation/refs/heads/main/forestdonos_ui.lua"
 local AUTO_HOP_SETTINGS_FILE = "forestdonos_settings.json"
 local LocalPlayer = Players.LocalPlayer
 
@@ -30,15 +29,31 @@ if not LocalPlayer then
     return
 end
 
-local function notify(text)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = "Forest Donations",
-            Text = tostring(text),
-            Duration = 5,
-        })
-    end)
+local notify
+local uiFetchOk, uiModuleSource = pcall(function()
+    return game:HttpGet(UI_MODULE_URL)
+end)
+if not uiFetchOk then
+    warn("[Forest Donations] Could not fetch the UI companion: " .. tostring(uiModuleSource))
+    return
 end
+local uiCompiler = loadstring
+if type(uiCompiler) ~= "function" then
+    warn("[Forest Donations] loadstring is not available to load the UI companion.")
+    return
+end
+local uiChunk, uiCompileError = uiCompiler(uiModuleSource)
+if not uiChunk then
+    warn("[Forest Donations] Could not compile the UI companion: " .. tostring(uiCompileError))
+    return
+end
+local uiModuleOk, uiModule = pcall(uiChunk)
+if not uiModuleOk or type(uiModule) ~= "table"
+    or type(uiModule.create) ~= "function" or type(uiModule.notify) ~= "function" then
+    warn("[Forest Donations] UI companion failed to initialize: " .. tostring(uiModule))
+    return
+end
+notify = uiModule.notify
 
 local function getExecutorEnv()
     if type(getgenv) == "function" then
@@ -235,82 +250,118 @@ end
 local queueAutoHopUiReload
 local setAutoHopState
 local setPopulationHopState
+local hopSearchCancelled = false
 
-local function serverHop(minPlayers, maxPlayers)
-    local cursor = nil
-    local candidates = {}
+local function serverHop(minPlayers, maxPlayers, onStatus, shouldContinue)
+    local function canContinue()
+        return not hopSearchCancelled
+            and (type(shouldContinue) ~= "function" or shouldContinue())
+    end
+    local function report(message)
+        if type(onStatus) == "function" then
+            local statusOk, statusError = pcall(onStatus, message)
+            if not statusOk then
+                warn("[Forest Donations] Could not update hop-search status: " .. tostring(statusError))
+            end
+        else
+            warn("[Forest Donations] " .. tostring(message))
+        end
+    end
 
-    for _ = 1, 10 do
-        if cursor then
-            task.wait(0.4)
-        end
-        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-            :format(SERVER_HOP_PLACE_ID)
-        if cursor then
-            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
-        end
+    while canContinue() do
+        local cursor = nil
+        local candidates = {}
+        local searchError
 
-        local body, requestError = requestServerPage(url)
-        if not body then
-            return false, requestError or "The public server list was empty."
-        end
-        local decodedOk, page = pcall(function()
-            return HttpService:JSONDecode(body)
-        end)
-        if not decodedOk or type(page) ~= "table" or type(page.data) ~= "table" then
-            return false, "Could not parse the public server list response."
-        end
+        for _ = 1, 10 do
+            if not canContinue() then
+                break
+            end
+            if cursor then
+                task.wait(0.4)
+            end
+            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+                :format(SERVER_HOP_PLACE_ID)
+            if cursor then
+                url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+            end
 
-        for _, server in ipairs(page.data) do
-            local playing = tonumber(server.playing)
-            if playing
-                and playing >= minPlayers
-                and playing <= maxPlayers
-                and server.id
-                and tostring(server.id) ~= tostring(game.JobId) then
-                table.insert(candidates, server)
+            local body, requestError = requestServerPage(url)
+            if not body then
+                searchError = requestError or "The public server list was empty."
+                break
+            end
+            local decodedOk, page = pcall(function()
+                return HttpService:JSONDecode(body)
+            end)
+            if not decodedOk or type(page) ~= "table" or type(page.data) ~= "table" then
+                searchError = "Could not parse the public server list response."
+                break
+            end
+
+            for _, server in ipairs(page.data) do
+                local playing = tonumber(server.playing)
+                if playing
+                    and playing >= minPlayers
+                    and playing <= maxPlayers
+                    and server.id
+                    and tostring(server.id) ~= tostring(game.JobId) then
+                    table.insert(candidates, server)
+                end
+            end
+
+            cursor = page.nextPageCursor
+            if not cursor or #candidates > 0 then
+                break
             end
         end
 
-        cursor = page.nextPageCursor
-        if not cursor or #candidates > 0 then
-            break
+        if not canContinue() then
+            return false, "Server search cancelled."
         end
-        task.wait(0.2)
-    end
 
-    if #candidates == 0 then
-        return false, ("No other servers found with %d-%d players."):format(minPlayers, maxPlayers)
-    end
+        if #candidates > 0 then
+            local target = candidates[math.random(1, #candidates)]
+            local savedState = loadAutoHopState()
+            local autoHopActive = type(savedState) == "table" and savedState.Enabled == true
+            local populationHopActive = type(savedState) == "table" and savedState.PopulationEnabled == true
+            local persistMin = autoHopActive and tonumber(savedState.MinPlayers) or minPlayers
+            local persistMax = autoHopActive and tonumber(savedState.MaxPlayers) or maxPlayers
+            local persistInterval = autoHopActive and tonumber(savedState.IntervalMinutes) or 30
+            local queued, queueError = queueAutoHopUiReload(
+                autoHopActive,
+                persistMin,
+                persistMax,
+                persistInterval
+            )
+            if not queued and (autoHopActive or populationHopActive) then
+                return false, "Could not prepare the UI reload before teleport: " .. tostring(queueError)
+            end
+            if not queued then
+                warn("[Forest Donations] The hop will continue, but the UI cannot auto-reload: "
+                    .. tostring(queueError))
+            end
 
-    local target = candidates[math.random(1, #candidates)]
-    local savedState = loadAutoHopState()
-    local autoHopActive = type(savedState) == "table" and savedState.Enabled == true
-    local populationHopActive = type(savedState) == "table" and savedState.PopulationEnabled == true
-    local persistMin = autoHopActive and tonumber(savedState.MinPlayers) or minPlayers
-    local persistMax = autoHopActive and tonumber(savedState.MaxPlayers) or maxPlayers
-    local persistInterval = autoHopActive and tonumber(savedState.IntervalMinutes) or 30
-    local queued, queueError = queueAutoHopUiReload(
-        autoHopActive,
-        persistMin,
-        persistMax,
-        persistInterval
-    )
-    if not queued and (autoHopActive or populationHopActive) then
-        return false, "Could not prepare the UI reload before teleport: " .. tostring(queueError)
-    end
-    if not queued then
-        warn("[Forest Donations] The hop will continue, but the UI cannot auto-reload: "
-            .. tostring(queueError))
-    end
+            local ok, teleportError = pcall(function()
+                TeleportService:TeleportToPlaceInstance(SERVER_HOP_PLACE_ID, target.id, LocalPlayer)
+            end)
+            if ok then
+                return true, ("Joining a server with %d players..."):format(tonumber(target.playing) or 0)
+            end
+            searchError = "Teleport failed: " .. tostring(teleportError)
+        end
 
-    local ok, teleportError = pcall(function()
-        TeleportService:TeleportToPlaceInstance(SERVER_HOP_PLACE_ID, target.id, LocalPlayer)
-    end)
-    if not ok then
-        return false, "Teleport failed: " .. tostring(teleportError)
+        local message = searchError
+            or ("No server currently matches %d-%d players; retrying."):format(minPlayers, maxPlayers)
+        report(message)
+        for _ = 1, (searchError and 5 or 3) do
+            if not canContinue() then
+                return false, "Server search cancelled."
+            end
+            task.wait(1)
+        end
     end
-    return true, ("Joining a server with %d players..."):format(tonumber(target.playing) or 0)
+    return false, "Server search cancelled."
 end
 
 local function getQueueOnTeleport()
@@ -597,340 +648,33 @@ local function claimAndGoToStand(slot, forceClaim, alreadyRetried)
     return true, ("Claim request sent and moved to stand %02d; this stand does not expose ownership status."):format(slot), slot
 end
 
-local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
-if not playerGui then
-    warn("[Forest Donations] PlayerGui was not available; UI could not be created.")
+local persistedAutoHopSettings = loadAutoHopState()
+local uiCreated, ui, uiError = pcall(
+    uiModule.create,
+    SERVER_HOP_PLACE_ID,
+    persistedAutoHopSettings
+)
+if not uiCreated then
+    warn("[Forest Donations] UI creation failed: " .. tostring(ui))
+    return
+end
+if not ui then
+    warn("[Forest Donations] " .. tostring(uiError))
     return
 end
 
-local oldGui = playerGui:FindFirstChild("ForestDonationsUI")
-if oldGui then oldGui:Destroy() end
-
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "ForestDonationsUI"
-screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Parent = playerGui
-
-local panel = Instance.new("Frame")
-panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(360, 350)
-panel.Position = UDim2.new(0.5, -180, 0.5, -175)
-panel.BackgroundColor3 = Color3.fromRGB(48, 48, 52)
-panel.BorderSizePixel = 0
-panel.Parent = screenGui
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
-
-local title = Instance.new("TextLabel")
-title.Name = "Title"
-title.Size = UDim2.new(1, 0, 0, 42)
-title.BackgroundColor3 = Color3.fromRGB(76, 78, 84)
-title.BorderSizePixel = 0
-title.Text = "Forest Donations"
-title.TextColor3 = Color3.fromRGB(245, 245, 248)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 18
-title.Active = true
-title.Parent = panel
-Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
-
-local tabBar = Instance.new("Frame")
-tabBar.Name = "TabBar"
-tabBar.Size = UDim2.new(1, 0, 0, 32)
-tabBar.Position = UDim2.fromOffset(0, 42)
-tabBar.BackgroundColor3 = Color3.fromRGB(58, 59, 64)
-tabBar.BorderSizePixel = 0
-tabBar.Parent = panel
-
-local boothTab = Instance.new("TextButton")
-boothTab.Name = "BoothTab"
-boothTab.Size = UDim2.fromOffset(76, 26)
-boothTab.Position = UDim2.fromOffset(12, 3)
-boothTab.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
-boothTab.TextColor3 = Color3.fromRGB(255, 255, 255)
-boothTab.Text = "Booth"
-boothTab.Font = Enum.Font.GothamBold
-boothTab.TextSize = 13
-boothTab.AutoButtonColor = false
-boothTab.Parent = tabBar
-Instance.new("UICorner", boothTab).CornerRadius = UDim.new(0, 6)
-
-local serverHopTab = Instance.new("TextButton")
-serverHopTab.Name = "ServerHopTab"
-serverHopTab.Size = UDim2.fromOffset(100, 26)
-serverHopTab.Position = UDim2.fromOffset(96, 3)
-serverHopTab.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-serverHopTab.TextColor3 = Color3.fromRGB(220, 220, 224)
-serverHopTab.Text = "Server Hop"
-serverHopTab.Font = Enum.Font.GothamBold
-serverHopTab.TextSize = 13
-serverHopTab.AutoButtonColor = false
-serverHopTab.Parent = tabBar
-Instance.new("UICorner", serverHopTab).CornerRadius = UDim.new(0, 6)
-
-local boothPage = Instance.new("Frame")
-boothPage.Name = "BoothPage"
-boothPage.Size = UDim2.new(1, 0, 1, -74)
-boothPage.Position = UDim2.fromOffset(0, 74)
-boothPage.BackgroundTransparency = 1
-boothPage.Parent = panel
-
-local serverHopPage = Instance.new("Frame")
-serverHopPage.Name = "ServerHopPage"
-serverHopPage.Size = UDim2.new(1, 0, 1, -74)
-serverHopPage.Position = UDim2.fromOffset(0, 74)
-serverHopPage.BackgroundTransparency = 1
-serverHopPage.Visible = false
-serverHopPage.Parent = panel
-
-local function selectTab(selectedPage, selectedButton, otherPage, otherButton)
-    selectedPage.Visible = true
-    otherPage.Visible = false
-    selectedButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
-    selectedButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    otherButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-    otherButton.TextColor3 = Color3.fromRGB(220, 220, 224)
-end
-
-boothTab.MouseButton1Click:Connect(function()
-    selectTab(boothPage, boothTab, serverHopPage, serverHopTab)
-end)
-serverHopTab.MouseButton1Click:Connect(function()
-    selectTab(serverHopPage, serverHopTab, boothPage, boothTab)
-end)
-
-local dragging = false
-local dragInput
-local dragStart
-local panelStart
-
-title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        panelStart = panel.Position
-        dragInput = input
-
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - dragStart
-        panel.Position = UDim2.new(
-            panelStart.X.Scale,
-            panelStart.X.Offset + delta.X,
-            panelStart.Y.Scale,
-            panelStart.Y.Offset + delta.Y
-        )
-    end
-end)
-
-local subtitle = Instance.new("TextLabel")
-subtitle.Size = UDim2.new(1, -24, 0, 24)
-subtitle.Position = UDim2.fromOffset(12, 8)
-subtitle.BackgroundTransparency = 1
-subtitle.Text = "Claim a Donation Stand"
-subtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
-subtitle.Font = Enum.Font.Gotham
-subtitle.TextSize = 14
-subtitle.TextXAlignment = Enum.TextXAlignment.Left
-subtitle.Parent = boothPage
-
-local persistedAutoHopSettings = loadAutoHopState()
-
-local standBox = Instance.new("TextBox")
-standBox.Name = "StandNumber"
-standBox.Size = UDim2.fromOffset(76, 34)
-standBox.Position = UDim2.fromOffset(12, 42)
-standBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-standBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-standBox.PlaceholderText = "1 - 27"
-standBox.Text = ""
-standBox.ClearTextOnFocus = false
-standBox.Font = Enum.Font.Gotham
-standBox.TextSize = 14
-standBox.Parent = boothPage
-Instance.new("UICorner", standBox).CornerRadius = UDim.new(0, 6)
-
-local claimButton = Instance.new("TextButton")
-claimButton.Name = "ClaimButton"
-claimButton.Size = UDim2.fromOffset(200, 34)
-claimButton.Position = UDim2.fromOffset(100, 42)
-claimButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
-claimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-claimButton.Text = "Claim & Teleport"
-claimButton.Font = Enum.Font.GothamBold
-claimButton.TextSize = 14
-claimButton.AutoButtonColor = true
-claimButton.Parent = boothPage
-Instance.new("UICorner", claimButton).CornerRadius = UDim.new(0, 6)
-
-local status = Instance.new("TextLabel")
-status.Name = "Status"
-status.Size = UDim2.new(1, -24, 0, 58)
-status.Position = UDim2.fromOffset(12, 88)
-status.BackgroundTransparency = 1
-status.Text = "Searching for an available stand..."
-status.TextColor3 = Color3.fromRGB(214, 214, 218)
-status.Font = Enum.Font.Gotham
-status.TextSize = 13
-status.TextWrapped = true
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.TextYAlignment = Enum.TextYAlignment.Top
-status.Parent = boothPage
-
-local populationSubtitle = Instance.new("TextLabel")
-populationSubtitle.Name = "PopulationHopSubtitle"
-populationSubtitle.Size = UDim2.new(1, -24, 0, 22)
-populationSubtitle.Position = UDim2.fromOffset(12, 150)
-populationSubtitle.BackgroundTransparency = 1
-populationSubtitle.Text = "Population hopper"
-populationSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
-populationSubtitle.Font = Enum.Font.GothamBold
-populationSubtitle.TextSize = 14
-populationSubtitle.TextXAlignment = Enum.TextXAlignment.Left
-populationSubtitle.Parent = boothPage
-
-local populationThresholdBox = Instance.new("TextBox")
-populationThresholdBox.Name = "PopulationThreshold"
-populationThresholdBox.Size = UDim2.fromOffset(76, 34)
-populationThresholdBox.Position = UDim2.fromOffset(12, 176)
-populationThresholdBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-populationThresholdBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-populationThresholdBox.PlaceholderText = "Below #"
-populationThresholdBox.Text = persistedAutoHopSettings
-    and tostring(persistedAutoHopSettings.PopulationThreshold) or "10"
-populationThresholdBox.ClearTextOnFocus = false
-populationThresholdBox.Font = Enum.Font.Gotham
-populationThresholdBox.TextSize = 14
-populationThresholdBox.Parent = boothPage
-Instance.new("UICorner", populationThresholdBox).CornerRadius = UDim.new(0, 6)
-
-local populationHopButton = Instance.new("TextButton")
-populationHopButton.Name = "PopulationHopButton"
-populationHopButton.Size = UDim2.fromOffset(196, 34)
-populationHopButton.Position = UDim2.fromOffset(96, 176)
-populationHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-populationHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-populationHopButton.Text = "Population Hop: OFF"
-populationHopButton.Font = Enum.Font.GothamBold
-populationHopButton.TextSize = 13
-populationHopButton.Parent = boothPage
-Instance.new("UICorner", populationHopButton).CornerRadius = UDim.new(0, 6)
-
-local populationHopStatus = Instance.new("TextLabel")
-populationHopStatus.Name = "PopulationHopStatus"
-populationHopStatus.Size = UDim2.new(1, -24, 0, 46)
-populationHopStatus.Position = UDim2.fromOffset(12, 216)
-populationHopStatus.BackgroundTransparency = 1
-populationHopStatus.Text = "Hops when this server drops below the threshold; destination uses Server Hop Min/Max."
-populationHopStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
-populationHopStatus.Font = Enum.Font.Gotham
-populationHopStatus.TextSize = 12
-populationHopStatus.TextWrapped = true
-populationHopStatus.TextXAlignment = Enum.TextXAlignment.Left
-populationHopStatus.TextYAlignment = Enum.TextYAlignment.Top
-populationHopStatus.Parent = boothPage
-
-local hopSubtitle = Instance.new("TextLabel")
-hopSubtitle.Size = UDim2.new(1, -24, 0, 24)
-hopSubtitle.Position = UDim2.fromOffset(12, 8)
-hopSubtitle.BackgroundTransparency = 1
-hopSubtitle.Text = ("Find a server in place %d"):format(SERVER_HOP_PLACE_ID)
-hopSubtitle.TextColor3 = Color3.fromRGB(224, 224, 228)
-hopSubtitle.Font = Enum.Font.Gotham
-hopSubtitle.TextSize = 13
-hopSubtitle.TextXAlignment = Enum.TextXAlignment.Left
-hopSubtitle.Parent = serverHopPage
-
-local minPlayersBox = Instance.new("TextBox")
-minPlayersBox.Name = "MinimumPlayers"
-minPlayersBox.Size = UDim2.fromOffset(76, 34)
-minPlayersBox.Position = UDim2.fromOffset(12, 42)
-minPlayersBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-minPlayersBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-minPlayersBox.PlaceholderText = "Min"
-minPlayersBox.Text = ""
-minPlayersBox.ClearTextOnFocus = false
-minPlayersBox.Font = Enum.Font.Gotham
-minPlayersBox.TextSize = 14
-minPlayersBox.Parent = serverHopPage
-Instance.new("UICorner", minPlayersBox).CornerRadius = UDim.new(0, 6)
-
-local maxPlayersBox = Instance.new("TextBox")
-maxPlayersBox.Name = "MaximumPlayers"
-maxPlayersBox.Size = UDim2.fromOffset(76, 34)
-maxPlayersBox.Position = UDim2.fromOffset(96, 42)
-maxPlayersBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-maxPlayersBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-maxPlayersBox.PlaceholderText = "Max"
-maxPlayersBox.Text = ""
-maxPlayersBox.ClearTextOnFocus = false
-maxPlayersBox.Font = Enum.Font.Gotham
-maxPlayersBox.TextSize = 14
-maxPlayersBox.Parent = serverHopPage
-Instance.new("UICorner", maxPlayersBox).CornerRadius = UDim.new(0, 6)
-
-local hopButton = Instance.new("TextButton")
-hopButton.Name = "HopButton"
-hopButton.Size = UDim2.fromOffset(148, 34)
-hopButton.Position = UDim2.fromOffset(184, 42)
-hopButton.BackgroundColor3 = Color3.fromRGB(96, 99, 108)
-hopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-hopButton.Text = "Find & Join"
-hopButton.Font = Enum.Font.GothamBold
-hopButton.TextSize = 14
-hopButton.Parent = serverHopPage
-Instance.new("UICorner", hopButton).CornerRadius = UDim.new(0, 6)
-
-local autoIntervalBox = Instance.new("TextBox")
-autoIntervalBox.Name = "AutoHopIntervalMinutes"
-autoIntervalBox.Size = UDim2.fromOffset(76, 34)
-autoIntervalBox.Position = UDim2.fromOffset(12, 88)
-autoIntervalBox.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-autoIntervalBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-autoIntervalBox.PlaceholderText = "Minutes"
-autoIntervalBox.Text = "30"
-autoIntervalBox.ClearTextOnFocus = false
-autoIntervalBox.Font = Enum.Font.Gotham
-autoIntervalBox.TextSize = 14
-autoIntervalBox.Parent = serverHopPage
-Instance.new("UICorner", autoIntervalBox).CornerRadius = UDim.new(0, 6)
-
-local autoHopButton = Instance.new("TextButton")
-autoHopButton.Name = "AutoHopButton"
-autoHopButton.Size = UDim2.fromOffset(148, 34)
-autoHopButton.Position = UDim2.fromOffset(96, 88)
-autoHopButton.BackgroundColor3 = Color3.fromRGB(68, 69, 74)
-autoHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-autoHopButton.Text = "Auto Hop: OFF"
-autoHopButton.Font = Enum.Font.GothamBold
-autoHopButton.TextSize = 14
-autoHopButton.Parent = serverHopPage
-Instance.new("UICorner", autoHopButton).CornerRadius = UDim.new(0, 6)
-
-local hopStatus = Instance.new("TextLabel")
-hopStatus.Name = "ServerHopStatus"
-hopStatus.Size = UDim2.new(1, -24, 0, 58)
-hopStatus.Position = UDim2.fromOffset(12, 132)
-hopStatus.BackgroundTransparency = 1
-hopStatus.Text = "Enter minimum and maximum player counts."
-hopStatus.TextColor3 = Color3.fromRGB(214, 214, 218)
-hopStatus.Font = Enum.Font.Gotham
-hopStatus.TextSize = 13
-hopStatus.TextWrapped = true
-hopStatus.TextXAlignment = Enum.TextXAlignment.Left
-hopStatus.TextYAlignment = Enum.TextYAlignment.Top
-hopStatus.Parent = serverHopPage
-
+local standBox = ui.standBox
+local claimButton = ui.claimButton
+local status = ui.status
+local populationThresholdBox = ui.populationThresholdBox
+local populationHopButton = ui.populationHopButton
+local populationHopStatus = ui.populationHopStatus
+local minPlayersBox = ui.minPlayersBox
+local maxPlayersBox = ui.maxPlayersBox
+local hopButton = ui.hopButton
+local autoIntervalBox = ui.autoIntervalBox
+local autoHopButton = ui.autoHopButton
+local hopStatus = ui.hopStatus
 local busy = false
 local function runClaim(slot, forceClaim)
     if busy then return end
@@ -971,8 +715,14 @@ claimButton.MouseButton1Click:Connect(function()
 end)
 
 local hopping = false
+local manualSearchActive = false
+local populationHopGeneration = 0
 hopButton.MouseButton1Click:Connect(function()
     if hopping then
+        if manualSearchActive then
+            hopSearchCancelled = true
+            hopStatus.Text = "Cancelling server search..."
+        end
         return
     end
 
@@ -1000,11 +750,23 @@ hopButton.MouseButton1Click:Connect(function()
     end
 
     hopping = true
-    hopButton.Active = false
-    hopButton.Text = "Searching..."
+    manualSearchActive = true
+    hopSearchCancelled = false
+    hopButton.Active = true
+    hopButton.Text = "Cancel Search"
     hopStatus.Text = "Searching public servers..."
     task.spawn(function()
-        local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+        local ok, joined, message = pcall(
+            serverHop,
+            minPlayers,
+            maxPlayers,
+            function(searchMessage)
+                hopStatus.Text = searchMessage
+            end,
+            function()
+                return manualSearchActive
+            end
+        )
         if not ok then
             local hopError = joined
             joined = false
@@ -1023,6 +785,8 @@ hopButton.MouseButton1Click:Connect(function()
         hopButton.Active = true
         hopButton.Text = "Find & Join"
         hopping = false
+        manualSearchActive = false
+        hopSearchCancelled = false
     end)
 end)
 
@@ -1143,8 +907,21 @@ local function startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
                     return
                 end
                 hopping = true
+                hopSearchCancelled = false
+                hopButton.Active = false
+                hopButton.Text = "Searching..."
                 hopStatus.Text = "Auto-hop timer elapsed; searching for a matching server..."
-                local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+                local ok, joined, message = pcall(
+                    serverHop,
+                    minPlayers,
+                    maxPlayers,
+                    function(searchMessage)
+                        hopStatus.Text = searchMessage
+                    end,
+                    function()
+                        return autoHopEnabled and generation == autoHopGeneration
+                    end
+                )
                 if not ok then
                     local hopError = joined
                     joined = false
@@ -1155,6 +932,9 @@ local function startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
                 if not joined then
                     warn("[Forest Donations] " .. tostring(message))
                     hopping = false
+                    hopSearchCancelled = false
+                    hopButton.Active = true
+                    hopButton.Text = "Find & Join"
                 else
                     print("[Forest Donations] " .. tostring(message))
                     return
@@ -1165,8 +945,10 @@ local function startAutoHopWorker(minPlayers, maxPlayers, intervalMinutes)
 end
 
 local function startPopulationHopWorker()
+    populationHopGeneration = populationHopGeneration + 1
+    local generation = populationHopGeneration
     task.spawn(function()
-        while populationHopEnabled do
+        while populationHopEnabled and generation == populationHopGeneration do
             local playerCount = #Players:GetPlayers()
             local threshold = tonumber(populationThresholdBox.Text)
             populationHopStatus.Text = ("Current server: %d players. Hop threshold: below %s.")
@@ -1182,6 +964,7 @@ local function startPopulationHopWorker()
                         :format(playerCount, threshold)
                 else
                     hopping = true
+                    hopSearchCancelled = false
                     hopButton.Active = false
                     hopButton.Text = "Searching..."
                     populationHopStatus.Text = ("Only %d players remain; searching for a destination in the configured range...")
@@ -1193,7 +976,17 @@ local function startPopulationHopWorker()
                         maxPlayers,
                         savedState and savedState.IntervalMinutes or tonumber(autoIntervalBox.Text) or 30
                     )
-                    local ok, joined, message = pcall(serverHop, minPlayers, maxPlayers)
+                    local ok, joined, message = pcall(
+                        serverHop,
+                        minPlayers,
+                        maxPlayers,
+                        function(searchMessage)
+                            populationHopStatus.Text = searchMessage
+                        end,
+                        function()
+                            return populationHopEnabled and generation == populationHopGeneration
+                        end
+                    )
                     if not ok then
                         message = "Unexpected population-hop error: " .. tostring(joined)
                         joined = false
@@ -1209,6 +1002,7 @@ local function startPopulationHopWorker()
                     end
                     warn("[Forest Donations] " .. tostring(message))
                     hopping = false
+                    hopSearchCancelled = false
                     hopButton.Active = true
                     hopButton.Text = "Find & Join"
                     task.wait(30)
@@ -1223,6 +1017,7 @@ end
 populationHopButton.MouseButton1Click:Connect(function()
     if populationHopEnabled then
         populationHopEnabled = false
+        populationHopGeneration = populationHopGeneration + 1
         local threshold = tonumber(populationThresholdBox.Text) or 10
         local previous = loadAutoHopState()
         local saved, saveError = setPopulationHopState(
